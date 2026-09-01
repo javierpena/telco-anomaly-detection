@@ -1,0 +1,61 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: telco-anomaly-controller
+  namespace: telco-healthcheck-system
+  labels:
+    app: telco-anomaly-controller
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: telco-anomaly-controller
+  template:
+    metadata:
+      labels:
+        app: telco-anomaly-controller
+    spec:
+      serviceAccountName: telco-anomaly-operator
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: controller
+          image: quay.io/javierpena/telco-anomaly-controller:latest
+          imagePullPolicy: Always
+          args:
+            - --leader-elect
+            - --health-probe-bind-address=:8081
+            - --metrics-bind-address=:8080
+          ports:
+            - name: metrics
+              containerPort: 8080
+              protocol: TCP
+            - name: health
+              containerPort: 8081
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: health
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: health
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            limits:
+              cpu: 500m
+              memory: 256Mi
+            requests:
+              cpu: 100m
+              memory: 64Mi
+      terminationGracePeriodSeconds: 10

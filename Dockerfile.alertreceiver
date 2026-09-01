@@ -1,0 +1,12 @@
+FROM golang:1.22 AS builder
+WORKDIR /workspace
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+RUN CGO_ENABLED=0 GOOS=linux go build -a -o bin/alertreceiver ./cmd/alertreceiver/...
+
+FROM registry.access.redhat.com/ubi9/ubi-micro:latest
+WORKDIR /
+COPY --from=builder /workspace/bin/alertreceiver /alertreceiver
+USER 65532:65532
+ENTRYPOINT ["/alertreceiver"]

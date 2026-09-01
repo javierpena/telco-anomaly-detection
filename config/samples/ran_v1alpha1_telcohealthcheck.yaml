@@ -1,0 +1,28 @@
+apiVersion: ran.openshift.io/v1alpha1
+kind: TelcoHealthcheck
+metadata:
+  name: telco-healthcheck-sample
+  namespace: telco-healthcheck-system
+spec:
+  # Monitor all ACM ManagedClusters except the hub itself.
+  # Use `include` instead to whitelist specific clusters (mutually exclusive with exclude).
+  managedClusters:
+    exclude:
+      - local-cluster
+
+  # Restrict monitoring to these namespaces on each spoke cluster.
+  managedNamespaces:
+    - openshift-sriov-network-operator
+    - openshift-ovn-kubernetes
+
+  # Enable Thanos alert rules and agentic runs for each category.
+  alerts:
+    hostNetwork: true
+    podNetwork: true
+
+  periodicHealthChecks:
+    # Run a general health check on every spoke every 6 hours.
+    period: 6h
+    rdsCompliance:
+      enabled: false
+      # period: 24h  # uncomment to override the default period for RDS checks
