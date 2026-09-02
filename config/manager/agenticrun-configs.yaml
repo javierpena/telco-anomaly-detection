@@ -34,9 +34,9 @@ metadata:
 data:
   request: |
     You are an experienced OpenShift administrator. Alert TelcoHealthCheckHostReservedCPU has been raised for this cluster. This means the reserved CPUs, as defined by the PerformanceProfile resource, have a very high usage.
-    Analyze the pods running on the reserved CPUs, verify the CPU usage of the pods running on the openshift-* namespaces, and propose any remediation steps as needed to reduce the CPU usage in the reserved CPUs.  
-  skills: "[]"
-  mcpServers: "[]"
+    Analyze usage on the reserved CPUs, find potential root causes for the high usage, and propose any remediation steps as needed to reduce the CPU usage in the reserved CPUs.  
+  skills: '[{"image":"quay.io/javierpena/telco-anomaly-skills:latest","paths":["/skills/check-reserved-cpu-usage"]}]'
+  mcpServers: "[]"  
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -47,7 +47,6 @@ metadata:
     app.kubernetes.io/managed-by: telco-anomaly-detection
 data:
   request: |
-    You are an experienced OpenShift administrator. With the available tools at your disposal, check if this OpenShift cluster is compliant with the Telco RAN DU reference design.    
-    Report on all deviations found, displayed as `ValidationIssues` in the output. For all deviations marked as `required`, propose a fix to remediate them.
-  skills: "[]"
-  mcpServers: '[{"name":"kube-compare-mcp","timeoutSeconds":"300","url":"${KUBE_COMPARE_MCP_URL}"}]'
+    You are an experienced OpenShift administrator. With the available tools at your disposal, check if this OpenShift cluster is compliant with the Telco RAN DU reference design specification.
+  skills:  '[{"image":"quay.io/javierpena/telco-anomaly-skills:latest","paths":["/skills/check-rds-compliance"]}]'
+  mcpServers: '[{"name":"kube-compare-mcp","timeoutSeconds":300,"url":"${KUBE_COMPARE_MCP_URL}"}]'

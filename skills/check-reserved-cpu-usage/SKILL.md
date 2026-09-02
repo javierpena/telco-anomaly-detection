@@ -22,6 +22,8 @@ Before starting any checks, identify the reserved CPUs for each cluster node. Fo
 1. List the PerformanceProfile resources in the cluster. For each PerformanceProfile, record the `spec.nodeSelector` and `spec.cpu.reserved` values as NODE_SELECTOR and RESERVED_CPUS respectively.
 2. For each cluster node, check if they match the NODE_SELECTOR value. If so, the associated RESERVED_CPUS value applies to it the node.
 
+If the PerformanceProfile resource is not available, check the node's boot command line parameters, and find the reserved CPU list from `systemd.cpu_affinity`. Record it as RESERVED_CPUS.
+
 ## Step 1: Verify CPU usage for reserved CPUs
 
 For each reserved CPU on a cluster node, check if its usage over the last 5 minutes is above 90%. The following query will provide the CPU usage for all CPUs over the last 5 minutes:
