@@ -18,7 +18,7 @@ description: Run a compliance check against the Telco RAN Reference Design Speci
 ## Step 1: Verify RDS compliance
 
 1. Create a valid kubeconfig file for the cluster. You can get if from the `node-kubeconfigs` Secret in the `openshift-kube-apiserver` namespace. Use the data from `lb-ext.kubeconfig` for the kubeconfig.
-2. Use the `kube_compare_validate_rds` tool to verify RDS compliance against the RAN specification. Make sure the `kubeconfig` and `context` parameters are included, and refer to the kubeconfig file retrieved in the previous item.
+2. Use the `kube_compare_validate_rds` tool to verify RDS compliance against the RAN specification. Make sure the `kubeconfig` and `context` parameters are included, and refer to the kubeconfig file retrieved in the previous item.  Make sure the `kubeconfig` parameter is provided either via raw kubeconfig YAML content or base64-encoded kubeconfig
 
 ## Step 2: Analyze data and generate report
 
