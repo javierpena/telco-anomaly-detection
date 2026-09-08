@@ -14,6 +14,7 @@ var agenticRunConfigMapNames = []string{
 	"telco-anomaly-host-network-config",
 	"telco-anomaly-pod-network-config",
 	"telco-anomaly-rds-compliance-config",
+	"telco-anomaly-ovs-process-cpu-config",
 }
 
 // ensureAgenticRunConfigs creates the AgenticRun configuration ConfigMaps in namespace if they

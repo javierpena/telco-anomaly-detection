@@ -29,7 +29,8 @@ func reconcileAlertRules(ctx context.Context, c client.Client, spec ranv1alpha1.
 	logger.Info("reconciling Thanos custom alert rules",
 		"hostNetwork", spec.Alerts.HostNetwork,
 		"podNetwork", spec.Alerts.PodNetwork,
-		"hostReservedCPU", spec.Alerts.HostReservedCPU)
+		"hostReservedCPU", spec.Alerts.HostReservedCPU,
+		"ovsProcessCPU", spec.Alerts.OVSProcessCPU)
 
 	rulesContent := buildCustomRulesYAML(spec.Alerts)
 	logger.V(1).Info("built custom_rules.yaml", "content", rulesContent)
@@ -97,7 +98,7 @@ func cleanupAlertRules(ctx context.Context, c client.Client) error {
 // buildCustomRulesYAML produces the Prometheus rules YAML for the Thanos ConfigMap.
 // Rule groups are included or omitted based on the alerts spec.
 func buildCustomRulesYAML(alerts ranv1alpha1.AlertsSpec) string {
-	if !alerts.HostNetwork && !alerts.PodNetwork && !alerts.HostReservedCPU {
+	if !alerts.HostNetwork && !alerts.PodNetwork && !alerts.HostReservedCPU && !alerts.OVSProcessCPU {
 		return "groups: []\n"
 	}
 
@@ -110,6 +111,9 @@ func buildCustomRulesYAML(alerts ranv1alpha1.AlertsSpec) string {
 	}
 	if alerts.HostReservedCPU {
 		content += hostReservedCPURuleGroup()
+	}
+	if alerts.OVSProcessCPU {
+		content += ovsProcessCPURuleGroup()
 	}
 	return content
 }
@@ -155,6 +159,20 @@ func hostReservedCPURuleGroup() string {
           severity: warning
         annotations:
           cluster: '{{ $labels.cluster }}'
+`
+}
+
+func ovsProcessCPURuleGroup() string {
+	return `  - name: telco-ovs-process-cpu
+    rules:
+      - alert: TelcoHealthCheckOVSProcessCPU
+        expr: irate(ovs_db_process_cpu_seconds_total[10m]) > 1.0 or irate(ovs_vswitchd_process_cpu_seconds_total[10m]) > 1.0
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          cluster: '{{ $labels.cluster }}'
+          node: '{{ $labels.instance }}'
 `
 }
 

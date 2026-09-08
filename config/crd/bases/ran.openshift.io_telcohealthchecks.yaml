@@ -61,6 +61,10 @@ spec:
                     description: HostReservedCPU enables monitoring of host reserved-CPU
                       related alerts.
                     type: boolean
+                  ovsProcessCPU:
+                    description: OVSProcessCPU enables monitoring of OVS process CPU
+                      usage alerts.
+                    type: boolean
                   podNetwork:
                     description: PodNetwork enables monitoring of pod-network related
                       alerts.
@@ -68,6 +72,7 @@ spec:
                 required:
                 - hostNetwork
                 - hostReservedCPU
+                - ovsProcessCPU
                 - podNetwork
                 type: object
               logLevel:

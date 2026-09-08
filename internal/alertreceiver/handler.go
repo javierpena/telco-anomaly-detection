@@ -35,9 +35,10 @@ const (
 
 // alertConfigMaps maps an AlertManager alert name to the ConfigMap that holds its AgenticRun config.
 var alertConfigMaps = map[string]string{
-	"TelcoHealthCheckHostNetwork":    "telco-anomaly-host-network-config",
-	"TelcoHealthCheckPodNetwork":     "telco-anomaly-pod-network-config",
+	"TelcoHealthCheckHostNetwork":     "telco-anomaly-host-network-config",
+	"TelcoHealthCheckPodNetwork":      "telco-anomaly-pod-network-config",
 	"TelcoHealthCheckHostReservedCPU": "telco-anomaly-host-reserved-cpu-config",
+	"TelcoHealthCheckOVSProcessCPU":   "telco-anomaly-ovs-process-cpu-config",
 }
 
 // AlertManagerPayload is the top-level payload sent by AlertManager webhooks.
@@ -186,7 +187,7 @@ func (h *Handler) processAlerts(ctx context.Context, alerts []Alert) error {
 			"alertname", alertName)
 
 		kubeconfig := clusterKubeconfigs[clusterName]
-		if err := h.createAgenticRunOnCluster(ctx, kubeconfig, clusterName, alertName); err != nil {
+		if err := h.createAgenticRunOnCluster(ctx, kubeconfig, clusterName, alertName, alert.Annotations); err != nil {
 			logger.Error(err, "failed to create AgenticRun for alert",
 				"cluster", clusterName, "alertname", alertName)
 			// Continue processing other alerts.
@@ -322,7 +323,7 @@ func fetchKubeconfig(ctx context.Context, c client.Client, clusterName string) (
 
 // createAgenticRunOnCluster creates an AgenticRun in the openshift-lightspeed namespace
 // on the target cluster identified by the provided kubeconfig.
-func (h *Handler) createAgenticRunOnCluster(ctx context.Context, kubeconfig []byte, clusterName, alertName string) error {
+func (h *Handler) createAgenticRunOnCluster(ctx context.Context, kubeconfig []byte, clusterName, alertName string, annotations map[string]string) error {
 	logger := log.FromContext(ctx)
 
 	configMapName, ok := alertConfigMaps[alertName]
@@ -343,6 +344,9 @@ func (h *Handler) createAgenticRunOnCluster(ctx context.Context, kubeconfig []by
 	vars, err := agenticrun.BuildVarMap(ctx, h.HubClient, operatorNamespace, clusterName)
 	if err != nil {
 		return fmt.Errorf("building variable map for alert %q on cluster %s: %w", alertName, clusterName, err)
+	}
+	if node := annotations["node"]; node != "" {
+		vars["NODE_NAME"] = node
 	}
 	cfg = agenticrun.ExpandVariables(cfg, vars)
 

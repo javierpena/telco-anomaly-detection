@@ -153,3 +153,28 @@ func TestCleanupObservabilityMetrics_NotFound(t *testing.T) {
 		t.Fatalf("expected no error when ConfigMap not found, got: %v", err)
 	}
 }
+
+func TestBuildMetricsListYAML_OVSProcessCPUEnabled(t *testing.T) {
+	alerts := ranv1alpha1.AlertsSpec{OVSProcessCPU: true}
+	yaml := buildMetricsListYAML(alerts)
+
+	for _, m := range []string{
+		"ovs_db_process_cpu_seconds_total",
+		"ovs_vswitchd_process_cpu_seconds_total",
+	} {
+		if !strings.Contains(yaml, m) {
+			t.Errorf("expected metric %q in YAML, got: %q", m, yaml)
+		}
+	}
+	if !strings.HasPrefix(yaml, "names:\n") {
+		t.Errorf("expected YAML to start with 'names:', got: %q", yaml)
+	}
+}
+
+func TestBuildMetricsListYAML_OVSProcessCPUDisabled(t *testing.T) {
+	alerts := ranv1alpha1.AlertsSpec{OVSProcessCPU: false}
+	yaml := buildMetricsListYAML(alerts)
+	if strings.Contains(yaml, "ovs_") {
+		t.Errorf("unexpected OVS metrics when OVSProcessCPU disabled, got: %q", yaml)
+	}
+}

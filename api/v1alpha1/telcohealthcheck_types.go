@@ -43,6 +43,8 @@ type AlertsSpec struct {
 	PodNetwork bool `json:"podNetwork"`
 	// HostReservedCPU enables monitoring of host reserved-CPU related alerts.
 	HostReservedCPU bool `json:"hostReservedCPU"`
+	// OVSProcessCPU enables monitoring of OVS process CPU usage alerts.
+	OVSProcessCPU bool `json:"ovsProcessCPU"`
 }
 
 // RDSComplianceSpec configures periodic RDS compliance health checks.

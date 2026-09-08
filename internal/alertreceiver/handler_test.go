@@ -107,12 +107,16 @@ func TestParseAlertNamesFromRulesYAML(t *testing.T) {
 }
 
 func makeAgenticRunConfigMapUnstructured(name, namespace string) *unstructured.Unstructured {
+	return makeAgenticRunConfigMapWithRequest(name, namespace, "test-request")
+}
+
+func makeAgenticRunConfigMapWithRequest(name, namespace, request string) *unstructured.Unstructured {
 	cm := &unstructured.Unstructured{}
 	cm.SetGroupVersionKind(schema.GroupVersionKind{Group: "", Version: "v1", Kind: "ConfigMap"})
 	cm.SetName(name)
 	cm.SetNamespace(namespace)
 	if err := unstructured.SetNestedStringMap(cm.Object, map[string]string{
-		"request":    "test-request",
+		"request":    request,
 		"skills":     `[{"image":"quay.io/test:latest","paths":[]}]`,
 		"mcpServers": "[]",
 	}, "data"); err != nil {
@@ -281,5 +285,63 @@ func TestProcessAlerts_UndefinedAlertSkipped(t *testing.T) {
 	_ = spokeFake.List(context.Background(), runList)
 	if len(runList.Items) != 0 {
 		t.Errorf("expected no AgenticRuns created for undefined alert, got %d", len(runList.Items))
+	}
+}
+
+func TestProcessAlerts_NodeNameExpandedInRequest(t *testing.T) {
+	scheme := newHandlerScheme(t)
+
+	const alertName = "TelcoHealthCheckOVSProcessCPU"
+
+	thc := makeTHCWithMonitoredClusters("test", "default", []string{"cluster-a"})
+	kubeSecret := makeKubeconfigSecretUnstructured("cluster-a")
+	alertCM := makeAlertNamesConfigMap([]string{alertName})
+	configCM := makeAgenticRunConfigMapWithRequest(
+		"telco-anomaly-ovs-process-cpu-config", operatorNamespace,
+		"cluster=${CLUSTER_NAME} node=${NODE_NAME}",
+	)
+
+	hubClient := fake.NewClientBuilder().WithScheme(scheme).
+		WithStatusSubresource(thc).
+		WithObjects(thc, kubeSecret, alertCM, configCM).
+		Build()
+
+	var capturedRequest string
+	spokeFake := fake.NewClientBuilder().WithScheme(runtime.NewScheme()).Build()
+	h := &Handler{
+		HubClient: hubClient,
+		NewSpokeClient: func(_ []byte) (client.Client, error) {
+			return spokeFake, nil
+		},
+	}
+
+	alerts := []Alert{
+		{
+			Status:      "firing",
+			Labels:      map[string]string{"cluster": "cluster-a", "alertname": alertName},
+			Annotations: map[string]string{"node": "worker-1.example.com"},
+			StartsAt:    time.Now(),
+		},
+	}
+	if err := h.processAlerts(context.Background(), alerts); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	runList := &unstructured.UnstructuredList{}
+	runList.SetGroupVersionKind(schema.GroupVersionKind{
+		Group:   agenticrun.Group,
+		Version: agenticrun.Version,
+		Kind:    agenticrun.Kind + "List",
+	})
+	if err := spokeFake.List(context.Background(), runList); err != nil {
+		t.Fatalf("listing AgenticRuns: %v", err)
+	}
+	if len(runList.Items) == 0 {
+		t.Fatal("expected an AgenticRun to be created")
+	}
+
+	capturedRequest, _, _ = unstructured.NestedString(runList.Items[0].Object, "spec", "request")
+	if capturedRequest != "cluster=cluster-a node=worker-1.example.com" {
+		t.Errorf("request not expanded correctly, got: %q", capturedRequest)
 	}
 }

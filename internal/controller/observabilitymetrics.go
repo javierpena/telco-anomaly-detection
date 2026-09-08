@@ -109,6 +109,13 @@ func buildMetricsListYAML(alerts ranv1alpha1.AlertsSpec) string {
 		names = append(names, "openshift:cpu_usage_cores:sum")
 	}
 
+	if alerts.OVSProcessCPU {
+		names = append(names,
+			"ovs_db_process_cpu_seconds_total",
+			"ovs_vswitchd_process_cpu_seconds_total",
+		)
+	}
+
 	if len(names) == 0 {
 		return "names: []\n"
 	}

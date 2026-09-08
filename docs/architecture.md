@@ -157,6 +157,7 @@ The receiver validates `labels.alertname` against the Thanos rules it wrote itse
 | `alerts.hostNetwork` | `bool` | Enable the `TelcoHealthCheckHostNetwork` Thanos rule. |
 | `alerts.podNetwork` | `bool` | Enable the `TelcoHealthCheckPodNetwork` Thanos rule. |
 | `alerts.hostReservedCPU` | `bool` | Enable the `TelcoHealthCheckHostReservedCPU` Thanos rule. |
+| `alerts.ovsProcessCPU` | `bool` | Enable the `TelcoHealthCheckOVSProcessCPU` Thanos rule. |
 | `periodicHealthChecks.period` | `duration` | Default interval between periodic checks. Zero disables all periodic checks. |
 | `periodicHealthChecks.rdsCompliance.enabled` | `bool` | Activate the RDS compliance periodic check. |
 | `periodicHealthChecks.rdsCompliance.period` | `duration` | Override interval for the RDS compliance check. |
@@ -232,7 +233,7 @@ Triggered by changes to `TelcoHealthcheck` CRs or `ManagedCluster` resources (Ma
 6. **Resolve monitored clusters** (`getMonitoredClusters`) — list all `ManagedCluster` resources and apply include/exclude rules from the spec. Result stored in `status.monitoredClusters`.
 7. **Reconcile Thanos alert rules** (`reconcileAlertRules`) — create or update the `thanos-ruler-custom-rules` ConfigMap in `open-cluster-management-observability`. Non-fatal if this fails.
 8. **Reconcile AlertManager receiver** (`reconcileAlertManagerReceiver`) — read the `alertmanager-config` Secret in `open-cluster-management-observability`, upsert a webhook receiver entry pointing to the alert receiver service URL. Non-fatal if this fails.
-8a. **Reconcile MCO custom metrics allowlist** (`reconcileObservabilityMetrics`) — create or update the `observability-metrics-custom-allowlist` ConfigMap in `open-cluster-management-observability`. Content is driven by `spec.alerts`: when `podNetwork` is true the four container-network error/drop metrics are listed; when all flags are false the ConfigMap is written with an empty list. Non-fatal if this fails.
+8a. **Reconcile MCO custom metrics allowlist** (`reconcileObservabilityMetrics`) — create or update the `observability-metrics-custom-allowlist` ConfigMap in `open-cluster-management-observability`. Content is driven by `spec.alerts`: when `podNetwork` is true the four container-network error/drop metrics are listed; when `ovsProcessCPU` is true the two OVS process CPU metrics are added; when all flags are false the ConfigMap is written with an empty list. Non-fatal if this fails.
 9. **Periodic checks** (`runPeriodicChecks`) — for each enabled sub-check, if its period has elapsed, create AgenticRuns on all monitored spoke clusters. Currently only RDS compliance is implemented. Updates `status.lastRDSComplianceRunTime`.
 10. **Persist status** — write updated status back to the API server.
 11. **Requeue** — return `ctrl.Result{RequeueAfter: <time-until-next-check>}`.
@@ -293,9 +294,10 @@ AlertManager → POST /webhook
        └─ createAgenticRunOnCluster()
             │
             ├─ Look up alertConfigMaps[alertName] → ConfigMap name
-            │    "TelcoHealthCheckHostNetwork"    → telco-anomaly-host-network-config
-            │    "TelcoHealthCheckPodNetwork"     → telco-anomaly-pod-network-config
+            │    "TelcoHealthCheckHostNetwork"     → telco-anomaly-host-network-config
+            │    "TelcoHealthCheckPodNetwork"      → telco-anomaly-pod-network-config
             │    "TelcoHealthCheckHostReservedCPU" → telco-anomaly-host-reserved-cpu-config
+            │    "TelcoHealthCheckOVSProcessCPU"   → telco-anomaly-ovs-process-cpu-config
             │    Unknown → log warning, skip
             │
             ├─ LoadRunConfig(HubClient, configMapName, "telco-healthcheck-system")
@@ -363,6 +365,7 @@ Each trigger type reads its AgenticRun parameters from a dedicated ConfigMap in 
 | `TelcoHealthCheckHostNetwork` alert | `telco-anomaly-host-network-config` |
 | `TelcoHealthCheckPodNetwork` alert | `telco-anomaly-pod-network-config` |
 | `TelcoHealthCheckHostReservedCPU` alert | `telco-anomaly-host-reserved-cpu-config` |
+| `TelcoHealthCheckOVSProcessCPU` alert | `telco-anomaly-ovs-process-cpu-config` |
 | `rds-compliance` periodic check | `telco-anomaly-rds-compliance-config` |
 
 **ConfigMap data keys:**
@@ -387,6 +390,7 @@ All string fields (`request`, `mcpServers[*].url`, `mcpServers[*].name`, `skills
 |---|---|
 | `${OPERATOR_NAMESPACE}` | The operator namespace (`telco-healthcheck-system`) |
 | `${CLUSTER_NAME}` | The target spoke cluster name |
+| `${NODE_NAME}` | The node that triggered the alert (from `annotations.node`); alert path only — absent for periodic checks |
 | `${KUBE_COMPARE_MCP_URL}` | HTTP URL of the `telco-anomaly-kube-compare-mcp` Route (read from `status.ingress[0].host`); absent if the Route is not yet admitted |
 
 The expansion is implemented in `internal/agenticrun/expand.go` (`ExpandVariables`) and `internal/agenticrun/vars.go` (`BuildVarMap`). Both call sites (controller periodic path in `internal/controller/agenticrun.go` and alert receiver path in `internal/alertreceiver/handler.go`) call `BuildVarMap` then `ExpandVariables` between `LoadRunConfig` and `BuildObject`.
@@ -410,6 +414,7 @@ The ConfigMap is created or updated on every reconcile based on the `spec.alerts
 | `TelcoHealthCheckHostNetwork` | `spec.alerts.hostNetwork: true` | `sum by (clusterID, cluster, instance, prometheus) (instance:node_network_receive_drop_excluding_lo:rate1m > 1)` or transmit equivalent |
 | `TelcoHealthCheckPodNetwork` | `spec.alerts.podNetwork: true` | `sum by (clusterID, cluster, instance, pod) (container_network_receive_errors_total > 1)` or receive drops / transmit errors / transmit drops equivalents |
 | `TelcoHealthCheckHostReservedCPU` | `spec.alerts.hostReservedCPU: true` | `openshift:cpu_usage_cores:sum > 3` |
+| `TelcoHealthCheckOVSProcessCPU` | `spec.alerts.ovsProcessCPU: true` | `irate(ovs_db_process_cpu_seconds_total[10m]) > 1.0 or irate(ovs_vswitchd_process_cpu_seconds_total[10m]) > 1.0` |
 
 ---
 
@@ -459,6 +464,8 @@ The ConfigMap content is computed by `buildMetricsListYAML` from `spec.alerts`. 
 | `container_network_transmit_errors_total` | `spec.alerts.podNetwork: true` |
 | `container_network_transmit_packets_dropped_total` | `spec.alerts.podNetwork: true` |
 | `openshift:cpu_usage_cores:sum` | `spec.alerts.hostReservedCPU: true` |
+| `ovs_db_process_cpu_seconds_total` | `spec.alerts.ovsProcessCPU: true` |
+| `ovs_vswitchd_process_cpu_seconds_total` | `spec.alerts.ovsProcessCPU: true` |
 
 ### Future enhancement: namespace-scoped collection
 
@@ -530,6 +537,7 @@ Four ConfigMaps deployed alongside the operator (some with real `request` prompt
 - `telco-anomaly-pod-network-config` — placeholder `request`
 - `telco-anomaly-host-reserved-cpu-config` — real `request` prompt
 - `telco-anomaly-rds-compliance-config` — real `request` prompt; `mcpServers` wired to `${KUBE_COMPARE_MCP_URL}`
+- `telco-anomaly-ovs-process-cpu-config` — real `request` prompt for OVS process CPU investigation
 
 Edit these to supply real `request`, `skills`, and `mcpServers` values. The controller never overwrites them after initial creation.
 

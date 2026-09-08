@@ -50,3 +50,26 @@ data:
     You are an experienced OpenShift administrator. With the available tools at your disposal, check if this OpenShift cluster is compliant with the Telco RAN DU reference design specification.
   skills:  '[{"image":"quay.io/javierpena/telco-anomaly-skills:latest","paths":["/skills/check-rds-compliance"]}]'
   mcpServers: '[{"name":"kube-compare-mcp","timeoutSeconds":300,"url":"${KUBE_COMPARE_MCP_URL}"}]'
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: telco-anomaly-ovs-process-cpu-config
+  namespace: telco-healthcheck-system
+  labels:
+    app.kubernetes.io/managed-by: telco-anomaly-detection
+data:
+  request: |
+    You are an experienced OpenShift administrator. Alert TelcoHealthCheckOVSProcessCPU
+    has been raised for cluster ${CLUSTER_NAME}, node ${NODE_NAME}. One or both OVS
+    processes (ovsdb-server or ovs-vswitchd) is consuming more than 100% of a single
+    CPU core. Investigate by:
+    1) Checking the current CPU usage of OVS processes on the affected nodes.
+    2) Reviewing OVN/OVS logs for errors or high-churn flow programming events.
+    3) Checking the number of active flows and ports in OVS on the affected nodes.
+    4) Looking for recent changes in NetworkPolicy or OVN topology that could increase
+       flow processing load.
+    5) Checking overall node resource pressure (CPU throttling, load average).
+    Identify the root cause and suggest remediation steps.
+  skills: "[]"
+  mcpServers: "[]"

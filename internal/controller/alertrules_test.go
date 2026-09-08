@@ -255,3 +255,49 @@ func TestCleanupAlertRules_NotFound(t *testing.T) {
 		t.Errorf("expected nil when ConfigMap not found, got: %v", err)
 	}
 }
+
+func TestBuildCustomRulesYAML_OVSProcessCPUOnly(t *testing.T) {
+	alerts := ranv1alpha1.AlertsSpec{OVSProcessCPU: true}
+	yaml := buildCustomRulesYAML(alerts)
+	if !strings.Contains(yaml, "telco-ovs-process-cpu") {
+		t.Error("expected ovs-process-cpu group in YAML")
+	}
+	if strings.Contains(yaml, "telco-host-network") {
+		t.Error("unexpected host-network group in YAML")
+	}
+	if strings.Contains(yaml, "telco-pod-network") {
+		t.Error("unexpected pod-network group in YAML")
+	}
+	if strings.Contains(yaml, "telco-host-reserved-cpu") {
+		t.Error("unexpected host-reserved-cpu group in YAML")
+	}
+}
+
+func TestBuildCustomRulesYAML_OVSProcessCPUAlertContent(t *testing.T) {
+	alerts := ranv1alpha1.AlertsSpec{OVSProcessCPU: true}
+	yaml := buildCustomRulesYAML(alerts)
+
+	checks := []string{
+		"TelcoHealthCheckOVSProcessCPU",
+		"ovs_db_process_cpu_seconds_total",
+		"ovs_vswitchd_process_cpu_seconds_total",
+		"cluster:",
+		"node:",
+	}
+	for _, s := range checks {
+		if !strings.Contains(yaml, s) {
+			t.Errorf("expected %q in ovs-process-cpu YAML", s)
+		}
+	}
+}
+
+func TestOVSProcessCPUAlertNameParseable(t *testing.T) {
+	yaml := "groups:\n" + ovsProcessCPURuleGroup()
+	names, err := parseAlertNamesFromRulesYAML(yaml)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !names["TelcoHealthCheckOVSProcessCPU"] {
+		t.Error("expected TelcoHealthCheckOVSProcessCPU to be parsed from ovs-process-cpu rule group")
+	}
+}
