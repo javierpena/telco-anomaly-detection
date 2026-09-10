@@ -22,7 +22,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: kube-compare-mcp
-          image: quay.io/javierpena/kube-compare-mcp:f5be8da
+          image: quay.io/javierpena/kube-compare-mcp:b303043
           imagePullPolicy: Always
           args:
             - --port=8080
