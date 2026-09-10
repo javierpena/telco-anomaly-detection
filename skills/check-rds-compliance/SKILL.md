@@ -13,12 +13,12 @@ description: Run a compliance check against the Telco RAN Reference Design Speci
 ## Rules
 
 - Use available MCP tools whenever possible
-- The MCP server is running remotely. Make sure a valid kubeconfig file for the current cluster is passed as the `kubeconfig` parameter on any tool call
+- The MCP server is running remotely on an ACM hub cluster. Make sure you pass the `managed_cluster` parameter to the tool calls supporting it, to reference the cluster being checked
 
 ## Step 1: Verify RDS compliance
 
-1. Create a valid kubeconfig file for the cluster. You can get if from the `node-kubeconfigs` Secret in the `openshift-kube-apiserver` namespace. Extract the data from `lb-ext.kubeconfig` for the kubeconfig.
-2. Use the `kube_compare_validate_rds` tool to verify RDS compliance against the RAN specification. Make sure the `kubeconfig` and `context` parameters are included, and refer to the kubeconfig file retrieved in the previous item.  Make sure the `kubeconfig` parameter is provided via the raw contents of the kubeconfig file.
+1. Get the cluster name to be checked for RDS compliance.
+2. Use the `kube_compare_validate_rds` tool to verify RDS compliance against the RAN specification. Make sure the `managed_cluster` parameter is included.
 
 ## Step 2: Analyze data and generate report
 

@@ -47,7 +47,7 @@ metadata:
     app.kubernetes.io/managed-by: telco-anomaly-detection
 data:
   request: |
-    You are an experienced OpenShift administrator. With the available tools at your disposal, check if this OpenShift cluster is compliant with the Telco RAN DU reference design specification.
+    You are an experienced OpenShift administrator. With the available tools at your disposal, check if the OpenShift cluster ${CLUSTER_NAME} is compliant with the Telco RAN DU reference design specification.
   skills:  '[{"image":"quay.io/javierpena/telco-anomaly-skills:latest","paths":["/skills/check-rds-compliance"]}]'
   mcpServers: '[{"name":"kube-compare-mcp","timeoutSeconds":300,"url":"${KUBE_COMPARE_MCP_URL}"}]'
 ---
