@@ -72,6 +72,9 @@ func TestUpsertWebhookReceiver_AddsRoute(t *testing.T) {
 	if !strings.Contains(outStr, alertReceiverName) {
 		t.Error("expected route with receiver name in output")
 	}
+	if !strings.Contains(outStr, "repeat_interval") {
+		t.Error("expected repeat_interval in route to suppress re-notification while alert is firing")
+	}
 }
 
 func TestUpsertWebhookReceiver_EmptyConfig(t *testing.T) {
@@ -125,6 +128,7 @@ route:
   routes:
   - receiver: telco-anomaly-webhook
     continue: true
+    repeat_interval: 24h
 receivers:
 - name: default
 - name: telco-anomaly-webhook

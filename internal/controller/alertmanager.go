@@ -187,11 +187,14 @@ func upsertReceiver(raw interface{}, receiverName string, entry map[string]inter
 }
 
 // upsertRoute adds or replaces a continue-route for receiverName.
+// repeat_interval is set so AlertManager fires the webhook once on trigger and
+// once on resolution (via send_resolved), but does not re-notify while the alert remains firing.
 func upsertRoute(raw interface{}, receiverName string) []interface{} {
 	routes, _ := raw.([]interface{})
 	continueRoute := map[string]interface{}{
-		"receiver": receiverName,
-		"continue": true,
+		"receiver":        receiverName,
+		"continue":        true,
+		"repeat_interval": "24h",
 	}
 	for i, r := range routes {
 		if m, ok := r.(map[string]interface{}); ok {
