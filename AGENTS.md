@@ -85,11 +85,13 @@ The generated CRD YAML is authoritative; the file committed is a hand-written dr
 
 ## Commit conventions
 
-All commits that include Claude-assisted work must carry a co-author trailer:
+All commits that include AI-assisted work must carry a co-author trailer naming the model that actually did the work:
 
 ```
-Co-Authored-By: Claude Sonnet 4.6 (1M context) <noreply@anthropic.com>
+Co-Authored-By: Qwen3.8-27B <noreply@qwen.ai>
 ```
+
+Substitute the real model name/ID (and its contact) whenever a different model is used.
 
 ## Design documentation
 
