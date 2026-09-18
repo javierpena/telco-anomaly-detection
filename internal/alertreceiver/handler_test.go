@@ -345,3 +345,62 @@ func TestProcessAlerts_NodeNameExpandedInRequest(t *testing.T) {
 		t.Errorf("request not expanded correctly, got: %q", capturedRequest)
 	}
 }
+
+func makeUserAlertConfigMap(name, namespace, alertName string) *corev1.ConfigMap {
+	return &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: namespace,
+			Labels: map[string]string{
+				userAlertManagedByLabel: userAlertManagedByValue,
+				userAlertLabel:          userAlertLabelValue,
+			},
+		},
+		Data: map[string]string{
+			"alertName":  alertName,
+			"alertRule":  "- alert: " + alertName + "\n  expr: up == 0",
+			"request":    "check " + alertName,
+			"skills":     "[]",
+			"mcpServers": "[]",
+		},
+	}
+}
+
+func TestResolveAlertConfigMap_StaticMapTakesPrecedence(t *testing.T) {
+	scheme := newHandlerScheme(t)
+	// Add a user ConfigMap for a system alert name — static map must win.
+	userCM := makeUserAlertConfigMap("user-host-network", operatorNamespace, "TelcoHealthCheckHostNetwork")
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(userCM).Build()
+
+	name, err := resolveAlertConfigMap(context.Background(), c, "TelcoHealthCheckHostNetwork", operatorNamespace)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if name != "telco-anomaly-host-network-config" {
+		t.Errorf("expected static map result, got %q", name)
+	}
+}
+
+func TestResolveAlertConfigMap_UserDefined(t *testing.T) {
+	scheme := newHandlerScheme(t)
+	userCM := makeUserAlertConfigMap("my-custom-alert-config", operatorNamespace, "MyCustomAlert")
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(userCM).Build()
+
+	name, err := resolveAlertConfigMap(context.Background(), c, "MyCustomAlert", operatorNamespace)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if name != "my-custom-alert-config" {
+		t.Errorf("expected user ConfigMap name, got %q", name)
+	}
+}
+
+func TestResolveAlertConfigMap_NotFound(t *testing.T) {
+	scheme := newHandlerScheme(t)
+	c := fake.NewClientBuilder().WithScheme(scheme).Build()
+
+	_, err := resolveAlertConfigMap(context.Background(), c, "UnknownAlert", operatorNamespace)
+	if err == nil {
+		t.Error("expected an error for unknown alert, got nil")
+	}
+}

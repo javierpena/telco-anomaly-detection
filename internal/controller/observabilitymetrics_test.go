@@ -15,7 +15,7 @@ import (
 
 func TestBuildMetricsListYAML_AllDisabled(t *testing.T) {
 	alerts := ranv1alpha1.AlertsSpec{HostNetwork: false, PodNetwork: false}
-	yaml := buildMetricsListYAML(alerts)
+	yaml := buildMetricsListYAML(alerts, nil)
 	if yaml != "names: []\n" {
 		t.Errorf("expected empty names, got: %q", yaml)
 	}
@@ -23,7 +23,7 @@ func TestBuildMetricsListYAML_AllDisabled(t *testing.T) {
 
 func TestBuildMetricsListYAML_PodNetworkEnabled(t *testing.T) {
 	alerts := ranv1alpha1.AlertsSpec{PodNetwork: true}
-	yaml := buildMetricsListYAML(alerts)
+	yaml := buildMetricsListYAML(alerts, nil)
 
 	expectedMetrics := []string{
 		"container_network_receive_errors_total",
@@ -43,7 +43,7 @@ func TestBuildMetricsListYAML_PodNetworkEnabled(t *testing.T) {
 
 func TestBuildMetricsListYAML_PodNetworkDisabled(t *testing.T) {
 	alerts := ranv1alpha1.AlertsSpec{PodNetwork: false}
-	yaml := buildMetricsListYAML(alerts)
+	yaml := buildMetricsListYAML(alerts, nil)
 	if strings.Contains(yaml, "container_network") {
 		t.Errorf("unexpected container_network metrics when PodNetwork disabled, got: %q", yaml)
 	}
@@ -53,7 +53,7 @@ func TestReconcileObservabilityMetrics_Creates(t *testing.T) {
 	c := fake.NewClientBuilder().Build()
 	alerts := ranv1alpha1.AlertsSpec{PodNetwork: true}
 
-	if err := reconcileObservabilityMetrics(context.Background(), c, alerts); err != nil {
+	if err := reconcileObservabilityMetrics(context.Background(), c, alerts, nil); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
@@ -85,7 +85,7 @@ func TestReconcileObservabilityMetrics_Updates(t *testing.T) {
 	c := fake.NewClientBuilder().WithObjects(existing).Build()
 
 	alerts := ranv1alpha1.AlertsSpec{PodNetwork: true}
-	if err := reconcileObservabilityMetrics(context.Background(), c, alerts); err != nil {
+	if err := reconcileObservabilityMetrics(context.Background(), c, alerts, nil); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
@@ -106,7 +106,7 @@ func TestReconcileObservabilityMetrics_PodNetworkDisabled(t *testing.T) {
 	c := fake.NewClientBuilder().Build()
 	alerts := ranv1alpha1.AlertsSpec{PodNetwork: false}
 
-	if err := reconcileObservabilityMetrics(context.Background(), c, alerts); err != nil {
+	if err := reconcileObservabilityMetrics(context.Background(), c, alerts, nil); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
@@ -156,7 +156,7 @@ func TestCleanupObservabilityMetrics_NotFound(t *testing.T) {
 
 func TestBuildMetricsListYAML_OVSProcessCPUEnabled(t *testing.T) {
 	alerts := ranv1alpha1.AlertsSpec{OVSProcessCPU: true}
-	yaml := buildMetricsListYAML(alerts)
+	yaml := buildMetricsListYAML(alerts, nil)
 
 	for _, m := range []string{
 		"ovs_db_process_cpu_seconds_total",
@@ -173,8 +173,33 @@ func TestBuildMetricsListYAML_OVSProcessCPUEnabled(t *testing.T) {
 
 func TestBuildMetricsListYAML_OVSProcessCPUDisabled(t *testing.T) {
 	alerts := ranv1alpha1.AlertsSpec{OVSProcessCPU: false}
-	yaml := buildMetricsListYAML(alerts)
+	yaml := buildMetricsListYAML(alerts, nil)
 	if strings.Contains(yaml, "ovs_") {
 		t.Errorf("unexpected OVS metrics when OVSProcessCPU disabled, got: %q", yaml)
+	}
+}
+
+func TestBuildMetricsListYAML_UserAlerts(t *testing.T) {
+	alerts := ranv1alpha1.AlertsSpec{UserAlerts: true}
+	userAlerts := []UserAlertConfig{
+		{AlertMetrics: []string{"my_custom_metric_total", "another_metric"}},
+	}
+	yaml := buildMetricsListYAML(alerts, userAlerts)
+	if !strings.Contains(yaml, "my_custom_metric_total") {
+		t.Errorf("expected user metric in output, got: %q", yaml)
+	}
+	if !strings.Contains(yaml, "another_metric") {
+		t.Errorf("expected another_metric in output, got: %q", yaml)
+	}
+}
+
+func TestBuildMetricsListYAML_UserAlertsFlagFalseIgnored(t *testing.T) {
+	alerts := ranv1alpha1.AlertsSpec{UserAlerts: false}
+	userAlerts := []UserAlertConfig{
+		{AlertMetrics: []string{"should_not_appear"}},
+	}
+	yaml := buildMetricsListYAML(alerts, userAlerts)
+	if strings.Contains(yaml, "should_not_appear") {
+		t.Errorf("user metrics should be excluded when UserAlerts is false, got: %q", yaml)
 	}
 }

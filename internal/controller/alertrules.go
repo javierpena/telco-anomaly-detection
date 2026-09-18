@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -24,15 +25,16 @@ const (
 // the open-cluster-management-observability namespace. The ConfigMap content is driven
 // by the alerts field in the TelcoHealthcheck spec; actual rule definitions are added
 // in a later phase. The thanos-ruler config-reload sidecar picks up changes automatically.
-func reconcileAlertRules(ctx context.Context, c client.Client, spec ranv1alpha1.TelcoHealthcheckSpec) error {
+func reconcileAlertRules(ctx context.Context, c client.Client, spec ranv1alpha1.TelcoHealthcheckSpec, userAlerts []UserAlertConfig) error {
 	logger := log.FromContext(ctx)
 	logger.Info("reconciling Thanos custom alert rules",
 		"hostNetwork", spec.Alerts.HostNetwork,
 		"podNetwork", spec.Alerts.PodNetwork,
 		"hostReservedCPU", spec.Alerts.HostReservedCPU,
-		"ovsProcessCPU", spec.Alerts.OVSProcessCPU)
+		"ovsProcessCPU", spec.Alerts.OVSProcessCPU,
+		"userAlerts", spec.Alerts.UserAlerts)
 
-	rulesContent := buildCustomRulesYAML(spec.Alerts)
+	rulesContent := buildCustomRulesYAML(spec.Alerts, userAlerts)
 	logger.V(1).Info("built custom_rules.yaml", "content", rulesContent)
 
 	existing := &corev1.ConfigMap{}
@@ -96,9 +98,10 @@ func cleanupAlertRules(ctx context.Context, c client.Client) error {
 }
 
 // buildCustomRulesYAML produces the Prometheus rules YAML for the Thanos ConfigMap.
-// Rule groups are included or omitted based on the alerts spec.
-func buildCustomRulesYAML(alerts ranv1alpha1.AlertsSpec) string {
-	if !alerts.HostNetwork && !alerts.PodNetwork && !alerts.HostReservedCPU && !alerts.OVSProcessCPU {
+// Rule groups are included or omitted based on the alerts spec and any user-defined alerts.
+func buildCustomRulesYAML(alerts ranv1alpha1.AlertsSpec, userAlerts []UserAlertConfig) string {
+	hasUserAlerts := alerts.UserAlerts && len(userAlerts) > 0
+	if !alerts.HostNetwork && !alerts.PodNetwork && !alerts.HostReservedCPU && !alerts.OVSProcessCPU && !hasUserAlerts {
 		return "groups: []\n"
 	}
 
@@ -114,6 +117,13 @@ func buildCustomRulesYAML(alerts ranv1alpha1.AlertsSpec) string {
 	}
 	if alerts.OVSProcessCPU {
 		content += ovsProcessCPURuleGroup()
+	}
+	if hasUserAlerts {
+		for _, ua := range userAlerts {
+			indented := strings.ReplaceAll(strings.TrimSpace(ua.AlertRule), "\n", "\n    ")
+			content += fmt.Sprintf("  - name: telco-user-%s\n    rules:\n    %s\n",
+				strings.ToLower(ua.AlertName), indented)
+		}
 	}
 	return content
 }

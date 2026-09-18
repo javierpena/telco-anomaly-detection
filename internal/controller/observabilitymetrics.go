@@ -23,12 +23,13 @@ const (
 // ConfigMap in the open-cluster-management-observability namespace. The metric list is driven
 // by the alerts field in the TelcoHealthcheck spec; additional metrics can be appended here
 // as new alert types are introduced in future phases.
-func reconcileObservabilityMetrics(ctx context.Context, c client.Client, alerts ranv1alpha1.AlertsSpec) error {
+func reconcileObservabilityMetrics(ctx context.Context, c client.Client, alerts ranv1alpha1.AlertsSpec, userAlerts []UserAlertConfig) error {
 	logger := log.FromContext(ctx)
 	logger.Info("reconciling observability metrics allowlist",
-		"podNetwork", alerts.PodNetwork)
+		"podNetwork", alerts.PodNetwork,
+		"userAlerts", alerts.UserAlerts)
 
-	metricsContent := buildMetricsListYAML(alerts)
+	metricsContent := buildMetricsListYAML(alerts, userAlerts)
 	logger.V(1).Info("built metrics_list.yaml", "content", metricsContent)
 
 	existing := &corev1.ConfigMap{}
@@ -92,8 +93,8 @@ func cleanupObservabilityMetrics(ctx context.Context, c client.Client) error {
 }
 
 // buildMetricsListYAML produces the metrics_list.yaml content for the MCO custom allowlist.
-// Metric groups are included or omitted based on the alerts spec.
-func buildMetricsListYAML(alerts ranv1alpha1.AlertsSpec) string {
+// Metric groups are included or omitted based on the alerts spec and user-defined alerts.
+func buildMetricsListYAML(alerts ranv1alpha1.AlertsSpec, userAlerts []UserAlertConfig) string {
 	var names []string
 
 	if alerts.PodNetwork {
@@ -114,6 +115,12 @@ func buildMetricsListYAML(alerts ranv1alpha1.AlertsSpec) string {
 			"ovs_db_process_cpu_seconds_total",
 			"ovs_vswitchd_process_cpu_seconds_total",
 		)
+	}
+
+	if alerts.UserAlerts {
+		for _, ua := range userAlerts {
+			names = append(names, ua.AlertMetrics...)
+		}
 	}
 
 	if len(names) == 0 {

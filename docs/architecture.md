@@ -158,6 +158,7 @@ The receiver validates `labels.alertname` against the Thanos rules it wrote itse
 | `alerts.podNetwork` | `bool` | Enable the `TelcoHealthCheckPodNetwork` Thanos rule. |
 | `alerts.hostReservedCPU` | `bool` | Enable the `TelcoHealthCheckHostReservedCPU` Thanos rule. |
 | `alerts.ovsProcessCPU` | `bool` | Enable the `TelcoHealthCheckOVSProcessCPU` Thanos rule. |
+| `alerts.userAlerts` | `bool` | Enable discovery of user-defined alert ConfigMaps. See **User-defined alert ConfigMaps** below. |
 | `periodicHealthChecks.period` | `duration` | Default interval between periodic checks. Zero disables all periodic checks. |
 | `periodicHealthChecks.rdsCompliance.enabled` | `bool` | Activate the RDS compliance periodic check. |
 | `periodicHealthChecks.rdsCompliance.period` | `duration` | Override interval for the RDS compliance check. |
@@ -231,9 +232,10 @@ Triggered by changes to `TelcoHealthcheck` CRs or `ManagedCluster` resources (Ma
 5. **Ensure AgenticRun ConfigMaps** (`ensureAgenticRunConfigs`) — create the three AgenticRun config ConfigMaps in the operator namespace if they do not already exist. Returns an error (requeueing the object) if creation fails. Never overwrites an existing ConfigMap.
 5a. **Reconcile kube-compare-mcp** (`reconcileKubeCompareMCP`) — when `rdsCompliance.enabled` is true, creates the registry credentials secret and applies the kube-compare-mcp ServiceAccount, ClusterRole, ClusterRoleBinding, Deployment, Service, and Route via server-side apply. When false, removes all of those resources. Returns an error that stops the reconcile if any step fails.
 6. **Resolve monitored clusters** (`getMonitoredClusters`) — list all `ManagedCluster` resources and apply include/exclude rules from the spec. Result stored in `status.monitoredClusters`.
-7. **Reconcile Thanos alert rules** (`reconcileAlertRules`) — create or update the `thanos-ruler-custom-rules` ConfigMap in `open-cluster-management-observability`. Non-fatal if this fails.
+6a. **Collect user-defined alert configs** — when `spec.alerts.userAlerts` is true, list all user-alert ConfigMaps in the operator namespace via `listUserAlertConfigs` and pass the result to subsequent reconcile steps.
+7. **Reconcile Thanos alert rules** (`reconcileAlertRules`) — create or update the `thanos-ruler-custom-rules` ConfigMap in `open-cluster-management-observability`. When `userAlerts` is enabled, each user-alert ConfigMap's `alertRule` content is injected as an additional Prometheus rule group (`telco-user-<alertname-lowercased>`). Non-fatal if this fails.
 8. **Reconcile AlertManager receiver** (`reconcileAlertManagerReceiver`) — read the `alertmanager-config` Secret in `open-cluster-management-observability`, upsert a webhook receiver entry pointing to the alert receiver service URL. Non-fatal if this fails.
-8a. **Reconcile MCO custom metrics allowlist** (`reconcileObservabilityMetrics`) — create or update the `observability-metrics-custom-allowlist` ConfigMap in `open-cluster-management-observability`. Content is driven by `spec.alerts`: when `podNetwork` is true the four container-network error/drop metrics are listed; when `ovsProcessCPU` is true the two OVS process CPU metrics are added; when all flags are false the ConfigMap is written with an empty list. Non-fatal if this fails.
+8a. **Reconcile MCO custom metrics allowlist** (`reconcileObservabilityMetrics`) — create or update the `observability-metrics-custom-allowlist` ConfigMap in `open-cluster-management-observability`. Content is driven by `spec.alerts`: when `podNetwork` is true the four container-network error/drop metrics are listed; when `ovsProcessCPU` is true the two OVS process CPU metrics are added; when `userAlerts` is true, any metrics listed in user-alert ConfigMaps (`alertMetrics` key) are appended. Non-fatal if this fails.
 9. **Periodic checks** (`runPeriodicChecks`) — for each enabled sub-check, if its period has elapsed, create AgenticRuns on all monitored spoke clusters. Currently only RDS compliance is implemented. Updates `status.lastRDSComplianceRunTime`.
 10. **Persist status** — write updated status back to the API server.
 11. **Requeue** — return `ctrl.Result{RequeueAfter: <time-until-next-check>}`.
@@ -293,12 +295,14 @@ AlertManager → POST /webhook
        │
        └─ createAgenticRunOnCluster()
             │
-            ├─ Look up alertConfigMaps[alertName] → ConfigMap name
-            │    "TelcoHealthCheckHostNetwork"     → telco-anomaly-host-network-config
-            │    "TelcoHealthCheckPodNetwork"      → telco-anomaly-pod-network-config
-            │    "TelcoHealthCheckHostReservedCPU" → telco-anomaly-host-reserved-cpu-config
-            │    "TelcoHealthCheckOVSProcessCPU"   → telco-anomaly-ovs-process-cpu-config
-            │    Unknown → log warning, skip
+            ├─ resolveAlertConfigMap(alertName)
+            │    1. Check static alertConfigMaps map:
+            │       "TelcoHealthCheckHostNetwork"     → telco-anomaly-host-network-config
+            │       "TelcoHealthCheckPodNetwork"      → telco-anomaly-pod-network-config
+            │       "TelcoHealthCheckHostReservedCPU" → telco-anomaly-host-reserved-cpu-config
+            │       "TelcoHealthCheckOVSProcessCPU"   → telco-anomaly-ovs-process-cpu-config
+            │    2. Fall back: list user-alert ConfigMaps; match by data["alertName"]
+            │    Not found → log warning, skip
             │
             ├─ LoadRunConfig(HubClient, configMapName, "telco-healthcheck-system")
             │    Parse request / skills / mcpServers from ConfigMap data
@@ -415,6 +419,66 @@ The ConfigMap is created or updated on every reconcile based on the `spec.alerts
 | `TelcoHealthCheckPodNetwork` | `spec.alerts.podNetwork: true` | `sum by (clusterID, cluster, instance, pod) (container_network_receive_errors_total > 1)` or receive drops / transmit errors / transmit drops equivalents |
 | `TelcoHealthCheckHostReservedCPU` | `spec.alerts.hostReservedCPU: true` | `openshift:cpu_usage_cores:sum > 3` |
 | `TelcoHealthCheckOVSProcessCPU` | `spec.alerts.ovsProcessCPU: true` | `irate(ovs_db_process_cpu_seconds_total[10m]) > 1.0 or irate(ovs_vswitchd_process_cpu_seconds_total[10m]) > 1.0` |
+| User-defined (any name) | `spec.alerts.userAlerts: true` + user ConfigMap | Provided by user in `alertRule` field |
+
+### User-defined alert ConfigMaps
+
+When `spec.alerts.userAlerts: true`, the controller discovers additional alert rules from ConfigMaps in the operator namespace that carry both of the following labels:
+
+```
+app.kubernetes.io/managed-by: telco-anomaly-detection
+ran.openshift.io/user-managed-alert: "true"
+```
+
+**Required data keys:**
+
+| Key | Description |
+|---|---|
+| `alertName` | A unique identifier for this alert; must exactly match the `alert:` name inside `alertRule`. |
+| `alertRule` | Complete Prometheus rule block starting with `- alert: <name>`. |
+
+**Optional data keys:**
+
+| Key | Description |
+|---|---|
+| `alertMetrics` | Newline-separated metric names to add to the MCO custom allowlist. |
+| `request` | AgenticRun `spec.request` prompt for this alert. |
+| `skills` | JSON array of `{image, paths[]}` — same format as system config ConfigMaps. |
+| `mcpServers` | JSON array of `{name, url}` — same format as system config ConfigMaps. |
+
+**Group naming:** the controller auto-derives the Thanos rule group name as `telco-user-<alertname-lowercased>`.
+
+**Controller watch:** the controller watches ConfigMaps with both required labels (namespace-scoped). Any create, update, or delete of a matching ConfigMap immediately re-enqueues all `TelcoHealthcheck` CRs in the same namespace.
+
+**Alert receiver:** when a firing alert's name is not in the static `alertConfigMaps` map, `resolveAlertConfigMap` searches user-alert ConfigMaps in the operator namespace and matches by `alertName` data key. The matched ConfigMap is used as the AgenticRun configuration source.
+
+**Example:**
+
+```yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: my-custom-alert-config
+  namespace: telco-healthcheck-system
+  labels:
+    app.kubernetes.io/managed-by: telco-anomaly-detection
+    ran.openshift.io/user-managed-alert: "true"
+data:
+  alertName: MyCustomAlert
+  alertRule: |
+    - alert: MyCustomAlert
+      expr: my_custom_metric_total > 100
+      for: 5m
+      labels:
+        severity: warning
+      annotations:
+        cluster: '{{ $labels.cluster }}'
+  alertMetrics: |
+    my_custom_metric_total
+  request: "Investigate why my_custom_metric_total exceeded 100 on cluster ${CLUSTER_NAME}."
+  skills: "[]"
+  mcpServers: "[]"
+```
 
 ---
 

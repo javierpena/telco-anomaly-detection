@@ -45,6 +45,9 @@ type AlertsSpec struct {
 	HostReservedCPU bool `json:"hostReservedCPU"`
 	// OVSProcessCPU enables monitoring of OVS process CPU usage alerts.
 	OVSProcessCPU bool `json:"ovsProcessCPU"`
+	// UserAlerts enables processing of user-defined alert ConfigMaps labeled with
+	// ran.openshift.io/user-managed-alert: "true".
+	UserAlerts bool `json:"userAlerts"`
 }
 
 // RDSComplianceSpec configures periodic RDS compliance health checks.

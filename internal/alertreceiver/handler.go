@@ -14,6 +14,7 @@ import (
 
 	uberzap "go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/rest"
@@ -31,6 +32,13 @@ const (
 	thanosRulerConfigMap   = "thanos-ruler-custom-rules"
 	customRulesKey         = "custom_rules.yaml"
 	observabilityNamespace = "open-cluster-management-observability"
+
+	// Labels that identify user-defined alert ConfigMaps (duplicated from the controller package
+	// to avoid a cross-binary import dependency).
+	userAlertManagedByLabel = "app.kubernetes.io/managed-by"
+	userAlertManagedByValue = "telco-anomaly-detection"
+	userAlertLabel          = "ran.openshift.io/user-managed-alert"
+	userAlertLabelValue     = "true"
 )
 
 // alertConfigMaps maps an AlertManager alert name to the ConfigMap that holds its AgenticRun config.
@@ -321,14 +329,40 @@ func fetchKubeconfig(ctx context.Context, c client.Client, clusterName string) (
 	}
 }
 
+// resolveAlertConfigMap returns the ConfigMap name that holds AgenticRun config for alertName.
+// It checks the static alertConfigMaps map first; if not found it falls back to user-defined
+// alert ConfigMaps labeled with both userAlertManagedByLabel and userAlertLabel.
+func resolveAlertConfigMap(ctx context.Context, c client.Client, alertName, namespace string) (string, error) {
+	if name, ok := alertConfigMaps[alertName]; ok {
+		return name, nil
+	}
+
+	var cmList corev1.ConfigMapList
+	if err := c.List(ctx, &cmList,
+		client.InNamespace(namespace),
+		client.MatchingLabels{
+			userAlertManagedByLabel: userAlertManagedByValue,
+			userAlertLabel:          userAlertLabelValue,
+		},
+	); err != nil {
+		return "", err
+	}
+	for _, cm := range cmList.Items {
+		if cm.Data["alertName"] == alertName {
+			return cm.Name, nil
+		}
+	}
+	return "", fmt.Errorf("no AgenticRun config found for alert %q", alertName)
+}
+
 // createAgenticRunOnCluster creates an AgenticRun in the openshift-lightspeed namespace
 // on the target cluster identified by the provided kubeconfig.
 func (h *Handler) createAgenticRunOnCluster(ctx context.Context, kubeconfig []byte, clusterName, alertName string, annotations map[string]string) error {
 	logger := log.FromContext(ctx)
 
-	configMapName, ok := alertConfigMaps[alertName]
-	if !ok {
-		logger.Error(nil, "no AgenticRun ConfigMap configured for alert, skipping", "alertname", alertName)
+	configMapName, err := resolveAlertConfigMap(ctx, h.HubClient, alertName, operatorNamespace)
+	if err != nil {
+		logger.Error(err, "no AgenticRun ConfigMap for alert, skipping", "alertname", alertName)
 		return nil
 	}
 

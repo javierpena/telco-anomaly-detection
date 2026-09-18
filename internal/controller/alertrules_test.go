@@ -15,7 +15,7 @@ import (
 
 func TestBuildCustomRulesYAML_BothDisabled(t *testing.T) {
 	alerts := ranv1alpha1.AlertsSpec{HostNetwork: false, PodNetwork: false}
-	yaml := buildCustomRulesYAML(alerts)
+	yaml := buildCustomRulesYAML(alerts, nil)
 	if yaml != "groups: []\n" {
 		t.Errorf("expected empty groups, got: %q", yaml)
 	}
@@ -23,7 +23,7 @@ func TestBuildCustomRulesYAML_BothDisabled(t *testing.T) {
 
 func TestBuildCustomRulesYAML_HostNetworkOnly(t *testing.T) {
 	alerts := ranv1alpha1.AlertsSpec{HostNetwork: true, PodNetwork: false}
-	yaml := buildCustomRulesYAML(alerts)
+	yaml := buildCustomRulesYAML(alerts, nil)
 	if !strings.Contains(yaml, "telco-host-network") {
 		t.Error("expected host-network group in YAML")
 	}
@@ -34,7 +34,7 @@ func TestBuildCustomRulesYAML_HostNetworkOnly(t *testing.T) {
 
 func TestBuildCustomRulesYAML_PodNetworkOnly(t *testing.T) {
 	alerts := ranv1alpha1.AlertsSpec{HostNetwork: false, PodNetwork: true}
-	yaml := buildCustomRulesYAML(alerts)
+	yaml := buildCustomRulesYAML(alerts, nil)
 	if strings.Contains(yaml, "telco-host-network") {
 		t.Error("unexpected host-network group in YAML")
 	}
@@ -45,7 +45,7 @@ func TestBuildCustomRulesYAML_PodNetworkOnly(t *testing.T) {
 
 func TestBuildCustomRulesYAML_Both(t *testing.T) {
 	alerts := ranv1alpha1.AlertsSpec{HostNetwork: true, PodNetwork: true}
-	yaml := buildCustomRulesYAML(alerts)
+	yaml := buildCustomRulesYAML(alerts, nil)
 	if !strings.Contains(yaml, "telco-host-network") {
 		t.Error("expected host-network group in YAML")
 	}
@@ -56,7 +56,7 @@ func TestBuildCustomRulesYAML_Both(t *testing.T) {
 
 func TestBuildCustomRulesYAML_HostNetworkAlertContent(t *testing.T) {
 	alerts := ranv1alpha1.AlertsSpec{HostNetwork: true, PodNetwork: false}
-	yaml := buildCustomRulesYAML(alerts)
+	yaml := buildCustomRulesYAML(alerts, nil)
 
 	checks := []string{
 		"TelcoHealthCheckHostNetwork",
@@ -90,7 +90,7 @@ func TestReconcileAlertRules_Create(t *testing.T) {
 	spec := ranv1alpha1.TelcoHealthcheckSpec{
 		Alerts: ranv1alpha1.AlertsSpec{HostNetwork: true, PodNetwork: false},
 	}
-	if err := reconcileAlertRules(context.Background(), c, spec); err != nil {
+	if err := reconcileAlertRules(context.Background(), c, spec, nil); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
@@ -121,7 +121,7 @@ func TestReconcileAlertRules_Update(t *testing.T) {
 	spec := ranv1alpha1.TelcoHealthcheckSpec{
 		Alerts: ranv1alpha1.AlertsSpec{HostNetwork: true, PodNetwork: true},
 	}
-	if err := reconcileAlertRules(context.Background(), c, spec); err != nil {
+	if err := reconcileAlertRules(context.Background(), c, spec, nil); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
@@ -173,7 +173,7 @@ func TestParseAlertNamesFromRulesYAML_Empty(t *testing.T) {
 
 func TestBuildCustomRulesYAML_HostReservedCPUOnly(t *testing.T) {
 	alerts := ranv1alpha1.AlertsSpec{HostNetwork: false, PodNetwork: false, HostReservedCPU: true}
-	yaml := buildCustomRulesYAML(alerts)
+	yaml := buildCustomRulesYAML(alerts, nil)
 	if !strings.Contains(yaml, "telco-host-reserved-cpu") {
 		t.Error("expected host-reserved-cpu group in YAML")
 	}
@@ -187,7 +187,7 @@ func TestBuildCustomRulesYAML_HostReservedCPUOnly(t *testing.T) {
 
 func TestBuildCustomRulesYAML_AllEnabled(t *testing.T) {
 	alerts := ranv1alpha1.AlertsSpec{HostNetwork: true, PodNetwork: true, HostReservedCPU: true}
-	yaml := buildCustomRulesYAML(alerts)
+	yaml := buildCustomRulesYAML(alerts, nil)
 	for _, group := range []string{"telco-host-network", "telco-pod-network", "telco-host-reserved-cpu"} {
 		if !strings.Contains(yaml, group) {
 			t.Errorf("expected %q in YAML", group)
@@ -197,7 +197,7 @@ func TestBuildCustomRulesYAML_AllEnabled(t *testing.T) {
 
 func TestBuildCustomRulesYAML_HostReservedCPUAlertContent(t *testing.T) {
 	alerts := ranv1alpha1.AlertsSpec{HostReservedCPU: true}
-	yaml := buildCustomRulesYAML(alerts)
+	yaml := buildCustomRulesYAML(alerts, nil)
 
 	checks := []string{
 		"TelcoHealthCheckHostReservedCPU",
@@ -258,7 +258,7 @@ func TestCleanupAlertRules_NotFound(t *testing.T) {
 
 func TestBuildCustomRulesYAML_OVSProcessCPUOnly(t *testing.T) {
 	alerts := ranv1alpha1.AlertsSpec{OVSProcessCPU: true}
-	yaml := buildCustomRulesYAML(alerts)
+	yaml := buildCustomRulesYAML(alerts, nil)
 	if !strings.Contains(yaml, "telco-ovs-process-cpu") {
 		t.Error("expected ovs-process-cpu group in YAML")
 	}
@@ -275,7 +275,7 @@ func TestBuildCustomRulesYAML_OVSProcessCPUOnly(t *testing.T) {
 
 func TestBuildCustomRulesYAML_OVSProcessCPUAlertContent(t *testing.T) {
 	alerts := ranv1alpha1.AlertsSpec{OVSProcessCPU: true}
-	yaml := buildCustomRulesYAML(alerts)
+	yaml := buildCustomRulesYAML(alerts, nil)
 
 	checks := []string{
 		"TelcoHealthCheckOVSProcessCPU",
@@ -299,5 +299,50 @@ func TestOVSProcessCPUAlertNameParseable(t *testing.T) {
 	}
 	if !names["TelcoHealthCheckOVSProcessCPU"] {
 		t.Error("expected TelcoHealthCheckOVSProcessCPU to be parsed from ovs-process-cpu rule group")
+	}
+}
+
+func TestBuildCustomRulesYAML_UserAlertsOnly(t *testing.T) {
+	alerts := ranv1alpha1.AlertsSpec{UserAlerts: true}
+	userAlerts := []UserAlertConfig{
+		{
+			AlertName: "MyCustomAlert",
+			AlertRule: "- alert: MyCustomAlert\n  expr: up == 0",
+		},
+	}
+	yaml := buildCustomRulesYAML(alerts, userAlerts)
+	if yaml == "groups: []\n" {
+		t.Error("expected non-empty groups when only user alerts are enabled")
+	}
+	if !strings.Contains(yaml, "telco-user-mycustomalert") {
+		t.Errorf("expected user alert group name in YAML, got: %q", yaml)
+	}
+	if !strings.Contains(yaml, "MyCustomAlert") {
+		t.Error("expected alert name in user alert YAML")
+	}
+}
+
+func TestBuildCustomRulesYAML_UserAlertsDisabledFlagIgnored(t *testing.T) {
+	alerts := ranv1alpha1.AlertsSpec{UserAlerts: false}
+	userAlerts := []UserAlertConfig{
+		{AlertName: "MyCustomAlert", AlertRule: "- alert: MyCustomAlert\n  expr: up == 0"},
+	}
+	yaml := buildCustomRulesYAML(alerts, userAlerts)
+	if yaml != "groups: []\n" {
+		t.Errorf("expected empty groups when UserAlerts flag is false, got: %q", yaml)
+	}
+}
+
+func TestBuildCustomRulesYAML_UserAlertsMixedWithSystem(t *testing.T) {
+	alerts := ranv1alpha1.AlertsSpec{HostNetwork: true, UserAlerts: true}
+	userAlerts := []UserAlertConfig{
+		{AlertName: "MyCustomAlert", AlertRule: "- alert: MyCustomAlert\n  expr: up == 0"},
+	}
+	yaml := buildCustomRulesYAML(alerts, userAlerts)
+	if !strings.Contains(yaml, "telco-host-network") {
+		t.Error("expected system host-network group")
+	}
+	if !strings.Contains(yaml, "telco-user-mycustomalert") {
+		t.Error("expected user alert group")
 	}
 }

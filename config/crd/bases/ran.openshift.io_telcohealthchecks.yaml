@@ -69,11 +69,17 @@ spec:
                     description: PodNetwork enables monitoring of pod-network related
                       alerts.
                     type: boolean
+                  userAlerts:
+                    description: |-
+                      UserAlerts enables processing of user-defined alert ConfigMaps labeled with
+                      ran.openshift.io/user-managed-alert: "true".
+                    type: boolean
                 required:
                 - hostNetwork
                 - hostReservedCPU
                 - ovsProcessCPU
                 - podNetwork
+                - userAlerts
                 type: object
               logLevel:
                 default: info

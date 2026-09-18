@@ -7,14 +7,17 @@ import (
 
 	uberzap "go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	clusterv1 "open-cluster-management.io/api/cluster/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
 	ranv1alpha1 "github.com/javierpena/telco-anomaly-detection/api/v1alpha1"
 )
@@ -109,14 +112,23 @@ func (r *TelcoHealthcheckReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	}
 	thc.Status.MonitoredClusters = monitoredClusters
 
+	// Collect user-defined alert configs when the feature is enabled.
+	var userAlerts []UserAlertConfig
+	if thc.Spec.Alerts.UserAlerts {
+		userAlerts, err = listUserAlertConfigs(ctx, r.Client, req.Namespace)
+		if err != nil {
+			return ctrl.Result{}, fmt.Errorf("listing user alert configs: %w", err)
+		}
+	}
+
 	// Reconcile Thanos alert rules.
-	if err := reconcileAlertRules(ctx, r.Client, thc.Spec); err != nil {
+	if err := reconcileAlertRules(ctx, r.Client, thc.Spec, userAlerts); err != nil {
 		logger.Error(err, "failed to reconcile alert rules")
 		// Non-fatal: log and continue so the rest of the reconcile proceeds.
 	}
 
 	// Reconcile MCO custom metrics allowlist.
-	if err := reconcileObservabilityMetrics(ctx, r.Client, thc.Spec.Alerts); err != nil {
+	if err := reconcileObservabilityMetrics(ctx, r.Client, thc.Spec.Alerts, userAlerts); err != nil {
 		logger.Error(err, "failed to reconcile observability metrics allowlist")
 		// Non-fatal: log and continue.
 	}
@@ -269,13 +281,18 @@ func (r *TelcoHealthcheckReconciler) alertReceiverURL(namespace string) string {
 }
 
 // SetupWithManager registers the controller with the manager and sets up watches on
-// TelcoHealthcheck resources and ManagedCluster resources.
+// TelcoHealthcheck resources, ManagedCluster resources, and user-alert ConfigMaps.
 func (r *TelcoHealthcheckReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&ranv1alpha1.TelcoHealthcheck{}).
 		Watches(
 			&clusterv1.ManagedCluster{},
 			handler.EnqueueRequestsFromMapFunc(r.mapManagedClusterToTelcoHealthchecks),
+		).
+		Watches(
+			&corev1.ConfigMap{},
+			handler.EnqueueRequestsFromMapFunc(r.mapUserAlertCMToTHC),
+			builder.WithPredicates(predicate.NewPredicateFuncs(isUserAlertConfigMap)),
 		).
 		Complete(r)
 }

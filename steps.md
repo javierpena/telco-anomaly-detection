@@ -73,7 +73,19 @@
 - [ ] Add actual skill paths to `spec.tools.skills[].paths` once the skills OCI image is finalized
 - [x] Add MCP servers to `spec.tools.mcpServers` for `rds-compliance` (`${KUBE_COMPARE_MCP_URL}`)
 
-## Phase 10: RDS Compliance Implementation (Deferred)
+## Phase 10: User-Defined Alert Rules ✅
+
+- [x] Add `UserAlerts bool` to `AlertsSpec` in `api/v1alpha1/telcohealthcheck_types.go`
+- [x] Create `internal/controller/useralerts.go` — `UserAlertConfig` struct, label constants, `listUserAlertConfigs`, ConfigMap watch helpers
+- [x] Extend `buildCustomRulesYAML` and `reconcileAlertRules` to include user alert groups
+- [x] Extend `buildMetricsListYAML` and `reconcileObservabilityMetrics` to append user-defined metrics
+- [x] Update main reconcile loop to collect user alert configs and pass them to reconcile functions
+- [x] Add ConfigMap watch in `SetupWithManager` with label predicate (namespace-scoped)
+- [x] Replace static `alertConfigMaps` lookup in alert receiver with dynamic `resolveAlertConfigMap` fallback
+- [x] Add unit tests for all new functions (`TestListUserAlertConfigs_*`, `TestBuildCustomRulesYAML_UserAlerts*`, `TestBuildMetricsListYAML_UserAlerts*`, `TestResolveAlertConfigMap_*`)
+- [x] Update `docs/architecture.md` with user-alert ConfigMap format and controller/receiver flow
+
+## Phase 11: RDS Compliance Implementation (Deferred)
 
 - [ ] Define what "RDS compliance" checks entail
 - [ ] Implement a dedicated AgenticRun configuration for RDS compliance checks
