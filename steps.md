@@ -70,7 +70,7 @@
 
 - [x] Replace `spec.request: "test"` with a meaningful prompt for `hostNetwork`, `hostReservedCPU`, and `rds-compliance` check types
 - [ ] Replace `spec.request: "test"` with a meaningful prompt for `podNetwork` check type
-- [ ] Add actual skill paths to `spec.tools.skills[].paths` once the skills OCI image is finalized
+- [x] Add actual skill paths to `spec.tools.skills[].paths` once the skills OCI image is finalized
 - [x] Add MCP servers to `spec.tools.mcpServers` for `rds-compliance` (`${KUBE_COMPARE_MCP_URL}`)
 
 ## Phase 10: User-Defined Alert Rules ✅
@@ -85,10 +85,10 @@
 - [x] Add unit tests for all new functions (`TestListUserAlertConfigs_*`, `TestBuildCustomRulesYAML_UserAlerts*`, `TestBuildMetricsListYAML_UserAlerts*`, `TestResolveAlertConfigMap_*`)
 - [x] Update `docs/architecture.md` with user-alert ConfigMap format and controller/receiver flow
 
-## Phase 11: RDS Compliance Implementation (Deferred)
+## Phase 11: RDS Compliance Implementation ✅
 
-- [ ] Define what "RDS compliance" checks entail
-- [ ] Implement a dedicated AgenticRun configuration for RDS compliance checks
+- [x] Define what "RDS compliance" checks entail
+- [x] Implement a dedicated AgenticRun configuration for RDS compliance checks
 
 ## Verification Commands
 

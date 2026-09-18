@@ -21,6 +21,8 @@ spec:
     podNetwork: true
     ovsProcessCPU: false
     hostReservedCPU: true
+    # Enable user-defined alerts
+    userAlerts: false
 
   periodicHealthChecks:
     # Run a general health check on every spoke every 6 hours.
