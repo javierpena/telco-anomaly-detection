@@ -441,7 +441,7 @@ ran.openshift.io/user-managed-alert: "true"
 
 | Key | Description |
 |---|---|
-| `alertMetrics` | Newline-separated metric names to add to the MCO custom allowlist. |
+| `alertMetrics` | JSON array of metric name strings to add to the MCO custom allowlist. |
 | `request` | AgenticRun `spec.request` prompt for this alert. |
 | `skills` | JSON array of `{image, paths[]}` — same format as system config ConfigMaps. |
 | `mcpServers` | JSON array of `{name, url}` — same format as system config ConfigMaps. |
@@ -473,8 +473,7 @@ data:
         severity: warning
       annotations:
         cluster: '{{ $labels.cluster }}'
-  alertMetrics: |
-    my_custom_metric_total
+  alertMetrics: '["my_custom_metric_total"]'
   request: "Investigate why my_custom_metric_total exceeded 100 on cluster ${CLUSTER_NAME}."
   skills: "[]"
   mcpServers: "[]"

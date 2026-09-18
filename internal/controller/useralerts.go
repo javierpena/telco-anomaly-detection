@@ -2,7 +2,8 @@ package controller
 
 import (
 	"context"
-	"strings"
+	"encoding/json"
+	"fmt"
 
 	corev1 "k8s.io/api/core/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -56,10 +57,10 @@ func listUserAlertConfigs(ctx context.Context, c client.Client, namespace string
 
 		var metrics []string
 		if raw := cm.Data["alertMetrics"]; raw != "" {
-			for _, line := range strings.Split(raw, "\n") {
-				if m := strings.TrimSpace(line); m != "" {
-					metrics = append(metrics, m)
-				}
+			if err := json.Unmarshal([]byte(raw), &metrics); err != nil {
+				logger.Info("user-alert ConfigMap has invalid alertMetrics JSON, skipping",
+					"configmap", cm.Name, "error", fmt.Sprintf("%v", err))
+				continue
 			}
 		}
 

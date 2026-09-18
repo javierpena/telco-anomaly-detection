@@ -30,7 +30,7 @@ func TestListUserAlertConfigs_ValidEntry(t *testing.T) {
 	cm := makeUserAlertCM("my-alert", testNamespace, map[string]string{
 		"alertName":    "MyAlert",
 		"alertRule":    "- alert: MyAlert\n  expr: up == 0",
-		"alertMetrics": "my_metric_total\nanother_metric\n",
+		"alertMetrics": `["my_metric_total", "another_metric"]`,
 	})
 	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(cm).Build()
 
@@ -102,6 +102,24 @@ func TestListUserAlertConfigs_UnlabeledCMIgnored(t *testing.T) {
 	}
 	if len(configs) != 0 {
 		t.Errorf("expected 0 configs for unlabeled CM, got %d", len(configs))
+	}
+}
+
+func TestListUserAlertConfigs_InvalidMetricsJSONSkipped(t *testing.T) {
+	scheme := newTestScheme(t)
+	cm := makeUserAlertCM("bad-metrics", testNamespace, map[string]string{
+		"alertName":    "AlertBadMetrics",
+		"alertRule":    "- alert: AlertBadMetrics\n  expr: up == 0",
+		"alertMetrics": "not-valid-json",
+	})
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(cm).Build()
+
+	configs, err := listUserAlertConfigs(context.Background(), c, testNamespace)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(configs) != 0 {
+		t.Errorf("expected ConfigMap with invalid alertMetrics to be skipped, got %d configs", len(configs))
 	}
 }
 
