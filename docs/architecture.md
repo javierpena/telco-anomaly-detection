@@ -128,7 +128,7 @@ AlertManager delivers alerts in the [AlertManager webhook format](https://promet
 }
 ```
 
-The receiver validates `labels.alertname` against the Thanos rules it wrote itself (by re-reading `thanos-ruler-custom-rules`) and `labels.cluster` against the `status.monitoredClusters` field across all `TelcoHealthcheck` CRs. Both checks must pass before an `AgenticRun` is created.
+The receiver validates `labels.alertname` against the Thanos rules it wrote itself (by re-reading `thanos-ruler-custom-rules`) and `labels.cluster` against the `status.monitoredClusters` field of the singleton `TelcoHealthcheck` CR. Both checks must pass before an `AgenticRun` is created.
 
 ### Dependency summary
 
@@ -228,6 +228,8 @@ TLS is provided by the OpenShift service CA operator: the Service `telco-anomaly
 
 The webhook uses `failurePolicy: Fail`, meaning CR creation is blocked while the controller pod is starting. The Makefile deploy order (`config/webhook/` before `config/manager/`) ensures the webhook Service and the cert Secret exist before the pod starts.
 
+A dedicated readiness check (`webhook-ca-bundle`) polls the `ValidatingWebhookConfiguration` via the API reader on every probe and returns not-ready until the CA bundle is non-empty. This keeps the pod in `0/1 Ready` during the injection window, making it safe to wait for `1/1 Ready` before creating the `TelcoHealthcheck` CR.
+
 ### Reconcile loop
 
 Triggered by changes to the singleton `TelcoHealthcheck` CR or `ManagedCluster` resources (ManagedCluster events enqueue the canonical CR `telco-healthcheck`). Steps in order:
@@ -286,10 +288,10 @@ AlertManager → POST /webhook
   ├─ Parse AlertManager JSON payload
   │
   ├─ getMonitoredClusters()
-  │    List all TelcoHealthcheck CRs
-  │    Union of status.monitoredClusters → set of valid cluster names
+  │    Get singleton TelcoHealthcheck CR (name: telco-healthcheck)
+  │    status.monitoredClusters → set of valid cluster names
   │    Fetch <name>/<name>-admin-kubeconfig Secret for each
-  │    Side-effect: update log level from most-verbose CR
+  │    Side-effect: update log level from spec.logLevel
   │
   ├─ getDefinedAlertNames()
   │    Read thanos-ruler-custom-rules ConfigMap
@@ -448,7 +450,7 @@ ran.openshift.io/user-managed-alert: "true"
 
 All seven data fields apply (see ConfigMap data keys table above). `alertGroupName` defaults to `telco-user-<alertname-lowercased>` when absent.
 
-**Controller watch:** the controller watches ConfigMaps with both required user-alert labels (namespace-scoped). Any create, update, or delete of a matching ConfigMap immediately re-enqueues all `TelcoHealthcheck` CRs in the same namespace.
+**Controller watch:** the controller watches ConfigMaps with both required user-alert labels (cluster-wide). Any create, update, or delete of a matching ConfigMap immediately re-enqueues the singleton `TelcoHealthcheck` CR (`telco-healthcheck`).
 
 **Alert receiver:** `resolveAlertConfigMap` lists all ConfigMaps in the operator namespace with label `app.kubernetes.io/managed-by: telco-anomaly-detection` and matches by `data["alertName"]`, accepting both system-alert and user-alert labels. No static routing table is used.
 
@@ -618,6 +620,7 @@ The CRD manifest for `TelcoHealthcheck`. Regenerated via `make manifests`.
 | `configmaps` | get, list, watch, create, update, patch, delete |
 | `leases` (coordination.k8s.io) | get, list, watch, create, update, patch, delete |
 | `events` | create, patch |
+| `validatingwebhookconfigurations` (admissionregistration.k8s.io) | get |
 | `serviceaccounts` | get, list, watch, create, update, patch, delete |
 | `services` | get, list, watch, create, update, patch, delete |
 | `deployments` (apps) | get, list, watch, create, update, patch, delete |
@@ -749,5 +752,3 @@ To update the kube-compare-mcp deployment (e.g. new image tag), edit these files
 | Phase | Item |
 |---|---|
 | Phase 8 | Real Prometheus expressions for `podNetwork` alert rules |
-| Phase 9 | Real `request` prompts and skill OCI image paths in AgenticRun config ConfigMaps |
-| ~~Phase 10~~ | ~~Wire the kube-compare-mcp MCP server URL into `telco-anomaly-rds-compliance-config`~~ — **Done**: `${KUBE_COMPARE_MCP_URL}` placeholder wired; resolved at runtime via Route lookup |
