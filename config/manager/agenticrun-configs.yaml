@@ -1,46 +1,6 @@
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: telco-anomaly-host-network-config
-  namespace: telco-healthcheck-system
-  labels:
-    app.kubernetes.io/managed-by: telco-anomaly-detection
-data:
-  request: |
-    You are an experienced OpenShift administrator. Alert TelcoHealthCheckHostNetwork has been raised for this cluster.
-    Check the network configuration of the node identified by the instance field in the alert, analyze the potential causes for this alert, and propose remediation steps.
-  skills: "[]"
-  mcpServers: "[]"
----
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: telco-anomaly-pod-network-config
-  namespace: telco-healthcheck-system
-  labels:
-    app.kubernetes.io/managed-by: telco-anomaly-detection
-data:
-  request: "test"
-  skills: "[]"
-  mcpServers: "[]"
----
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: telco-anomaly-host-reserved-cpu-config
-  namespace: telco-healthcheck-system
-  labels:
-    app.kubernetes.io/managed-by: telco-anomaly-detection
-data:
-  request: |
-    You are an experienced OpenShift administrator. Alert TelcoHealthCheckHostReservedCPU has been raised for this cluster. This means the reserved CPUs, as defined by the PerformanceProfile resource, have a very high usage.
-    Analyze usage on the reserved CPUs, find potential root causes for the high usage, and propose any remediation steps as needed to reduce the CPU usage in the reserved CPUs.  
-  skills: '[{"image":"quay.io/javierpena/telco-anomaly-skills:latest","paths":["/skills/check-reserved-cpu-usage"]}]'
-  mcpServers: "[]"  
----
-apiVersion: v1
-kind: ConfigMap
-metadata:
   name: telco-anomaly-rds-compliance-config
   namespace: telco-healthcheck-system
   labels:
@@ -50,26 +10,3 @@ data:
     You are an experienced OpenShift administrator. With the available tools at your disposal, check if the OpenShift cluster ${CLUSTER_NAME} is compliant with the Telco RAN DU reference design specification.
   skills:  '[{"image":"quay.io/javierpena/telco-anomaly-skills:latest","paths":["/skills/check-rds-compliance"]}]'
   mcpServers: '[{"name":"kube-compare-mcp","timeoutSeconds":300,"url":"${KUBE_COMPARE_MCP_URL}"}]'
----
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: telco-anomaly-ovs-process-cpu-config
-  namespace: telco-healthcheck-system
-  labels:
-    app.kubernetes.io/managed-by: telco-anomaly-detection
-data:
-  request: |
-    You are an experienced OpenShift administrator. Alert TelcoHealthCheckOVSProcessCPU
-    has been raised for cluster ${CLUSTER_NAME}, node ${NODE_NAME}. One or both OVS
-    processes (ovsdb-server or ovs-vswitchd) is consuming more than 100% of a single
-    CPU core. Investigate by:
-    1) Checking the current CPU usage of OVS processes on the affected nodes.
-    2) Reviewing OVN/OVS logs for errors or high-churn flow programming events.
-    3) Checking the number of active flows and ports in OVS on the affected nodes.
-    4) Looking for recent changes in NetworkPolicy or OVN topology that could increase
-       flow processing load.
-    5) Checking overall node resource pressure (CPU throttling, load average).
-    Identify the root cause and suggest remediation steps.
-  skills: "[]"
-  mcpServers: "[]"

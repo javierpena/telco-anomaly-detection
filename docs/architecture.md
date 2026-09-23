@@ -229,24 +229,25 @@ Triggered by changes to `TelcoHealthcheck` CRs or `ManagedCluster` resources (Ma
 2. **Deletion path** — if `DeletionTimestamp` is set, run cleanup then remove the finalizer.
 3. **Finalizer** — ensure `ran.openshift.io/telcohealthcheck-finalizer` is registered; return early if just added (triggers a new reconcile).
 4. **Log level sync** — read all `TelcoHealthcheck` CRs; set the logger's atomic level to `debug` if any CR requests it, `info` otherwise.
-5. **Ensure AgenticRun ConfigMaps** (`ensureAgenticRunConfigs`) — create the three AgenticRun config ConfigMaps in the operator namespace if they do not already exist. Returns an error (requeueing the object) if creation fails. Never overwrites an existing ConfigMap.
-5a. **Reconcile kube-compare-mcp** (`reconcileKubeCompareMCP`) — when `rdsCompliance.enabled` is true, creates the registry credentials secret and applies the kube-compare-mcp ServiceAccount, ClusterRole, ClusterRoleBinding, Deployment, Service, and Route via server-side apply. When false, removes all of those resources. Returns an error that stops the reconcile if any step fails.
+5. **Reconcile system-alert ConfigMaps** (`reconcileSystemAlertConfigMaps`) — for each of the four system alerts (`hostNetwork`, `podNetwork`, `hostReservedCPU`, `ovsProcessCPU`), creates or updates the corresponding ConfigMap in the operator namespace from the embedded asset file when the spec boolean is `true`, and deletes it when `false`. Must run before the alert-rule listing step. Returns an error (requeueing) if any create/update/delete fails.
+5a. **Ensure AgenticRun ConfigMaps** (`ensureAgenticRunConfigs`) — create the RDS compliance AgenticRun config ConfigMap in the operator namespace if it does not already exist (create-if-absent, never overwrite). Returns an error (requeueing) if creation fails.
+5b. **Reconcile kube-compare-mcp** (`reconcileKubeCompareMCP`) — when `rdsCompliance.enabled` is true, creates the registry credentials secret and applies the kube-compare-mcp ServiceAccount, ClusterRole, ClusterRoleBinding, Deployment, Service, and Route via server-side apply. When false, removes all of those resources. Returns an error that stops the reconcile if any step fails.
 6. **Resolve monitored clusters** (`getMonitoredClusters`) — list all `ManagedCluster` resources and apply include/exclude rules from the spec. Result stored in `status.monitoredClusters`.
-6a. **Collect user-defined alert configs** — when `spec.alerts.userAlerts` is true, list all user-alert ConfigMaps in the operator namespace via `listUserAlertConfigs` and pass the result to subsequent reconcile steps.
-7. **Reconcile Thanos alert rules** (`reconcileAlertRules`) — create or update the `thanos-ruler-custom-rules` ConfigMap in `open-cluster-management-observability`. When `userAlerts` is enabled, each user-alert ConfigMap's `alertRule` content is injected as an additional Prometheus rule group (`telco-user-<alertname-lowercased>`). Non-fatal if this fails.
+7. **Reconcile Thanos alert rules** (`reconcileAlertRules`) — lists system-alert ConfigMaps (always) and user-alert ConfigMaps (when `userAlerts` is true) in the operator namespace, builds a unified Prometheus YAML from their `alertRule` fields, and creates or updates `thanos-ruler-custom-rules` in `open-cluster-management-observability`. Group names come from `alertGroupName` (system alerts) or default to `telco-user-<alertname-lowercased>` (user alerts). Non-fatal if this fails.
 8. **Reconcile AlertManager receiver** (`reconcileAlertManagerReceiver`) — read the `alertmanager-config` Secret in `open-cluster-management-observability`, upsert a webhook receiver entry pointing to the alert receiver service URL. Non-fatal if this fails.
-8a. **Reconcile MCO custom metrics allowlist** (`reconcileObservabilityMetrics`) — create or update the `observability-metrics-custom-allowlist` ConfigMap in `open-cluster-management-observability`. Content is driven by `spec.alerts`: when `podNetwork` is true the four container-network error/drop metrics are listed; when `ovsProcessCPU` is true the two OVS process CPU metrics are added; when `userAlerts` is true, any metrics listed in user-alert ConfigMaps (`alertMetrics` key) are appended. Non-fatal if this fails.
+8a. **Reconcile MCO custom metrics allowlist** (`reconcileObservabilityMetrics`) — same listing pattern as step 7; deduplicates and writes all metric names from `alertMetrics` fields to `observability-metrics-custom-allowlist` in `open-cluster-management-observability`. Non-fatal if this fails.
 9. **Periodic checks** (`runPeriodicChecks`) — for each enabled sub-check, if its period has elapsed, create AgenticRuns on all monitored spoke clusters. Currently only RDS compliance is implemented. Updates `status.lastRDSComplianceRunTime`.
 10. **Persist status** — write updated status back to the API server.
 11. **Requeue** — return `ctrl.Result{RequeueAfter: <time-until-next-check>}`.
 
 ### Cleanup (on deletion)
 
-`cleanupResources` runs four steps (all attempted even if earlier ones fail):
+`cleanupResources` runs five steps (all attempted even if earlier ones fail):
 1. Remove the AlertManager webhook receiver entry from `alertmanager-config`.
 2. Delete the `thanos-ruler-custom-rules` ConfigMap.
 3. Remove all kube-compare-mcp resources (`cleanupKubeCompareMCP`) — idempotent, ignores not-found.
 4. Delete the `observability-metrics-custom-allowlist` ConfigMap (`cleanupObservabilityMetrics`) — idempotent, ignores not-found.
+5. Delete all four system-alert ConfigMaps (`cleanupSystemAlertConfigMaps`) — idempotent, ignores not-found.
 
 ---
 
@@ -296,12 +297,11 @@ AlertManager → POST /webhook
        └─ createAgenticRunOnCluster()
             │
             ├─ resolveAlertConfigMap(alertName)
-            │    1. Check static alertConfigMaps map:
-            │       "TelcoHealthCheckHostNetwork"     → telco-anomaly-host-network-config
-            │       "TelcoHealthCheckPodNetwork"      → telco-anomaly-pod-network-config
-            │       "TelcoHealthCheckHostReservedCPU" → telco-anomaly-host-reserved-cpu-config
-            │       "TelcoHealthCheckOVSProcessCPU"   → telco-anomaly-ovs-process-cpu-config
-            │    2. Fall back: list user-alert ConfigMaps; match by data["alertName"]
+            │    List all ConfigMaps in telco-healthcheck-system with
+            │    label app.kubernetes.io/managed-by: telco-anomaly-detection
+            │    Match by data["alertName"] where CM also carries either:
+            │      ran.openshift.io/system-managed-alert: "true"  (system alerts)
+            │      ran.openshift.io/user-managed-alert: "true"    (user alerts)
             │    Not found → log warning, skip
             │
             ├─ LoadRunConfig(HubClient, configMapName, "telco-healthcheck-system")
@@ -364,25 +364,29 @@ AgenticRun names are always lowercased (RFC 1123 subdomain requirement).
 
 Each trigger type reads its AgenticRun parameters from a dedicated ConfigMap in `telco-healthcheck-system`:
 
-| Trigger type | ConfigMap name |
-|---|---|
-| `TelcoHealthCheckHostNetwork` alert | `telco-anomaly-host-network-config` |
-| `TelcoHealthCheckPodNetwork` alert | `telco-anomaly-pod-network-config` |
-| `TelcoHealthCheckHostReservedCPU` alert | `telco-anomaly-host-reserved-cpu-config` |
-| `TelcoHealthCheckOVSProcessCPU` alert | `telco-anomaly-ovs-process-cpu-config` |
-| `rds-compliance` periodic check | `telco-anomaly-rds-compliance-config` |
+| Trigger type | ConfigMap name | Lifecycle |
+|---|---|---|
+| `TelcoHealthCheckHostNetwork` alert | `telco-anomaly-host-network-config` | Managed by `reconcileSystemAlertConfigMaps` from embedded asset |
+| `TelcoHealthCheckPodNetwork` alert | `telco-anomaly-pod-network-config` | Managed by `reconcileSystemAlertConfigMaps` from embedded asset |
+| `TelcoHealthCheckHostReservedCPU` alert | `telco-anomaly-host-reserved-cpu-config` | Managed by `reconcileSystemAlertConfigMaps` from embedded asset |
+| `TelcoHealthCheckOVSProcessCPU` alert | `telco-anomaly-ovs-process-cpu-config` | Managed by `reconcileSystemAlertConfigMaps` from embedded asset |
+| `rds-compliance` periodic check | `telco-anomaly-rds-compliance-config` | Deployed by `agenticrun-configs.yaml`; `ensureAgenticRunConfigs` create-if-absent |
 
-**ConfigMap data keys:**
+The four alert-type ConfigMaps carry label `ran.openshift.io/system-managed-alert: "true"`. The controller creates or updates them from the embedded asset YAML on every reconcile (when the corresponding spec boolean is true) and deletes them when disabled.
+
+**ConfigMap data keys (all ConfigMaps):**
 
 | Key | Format | Maps to |
 |---|---|---|
-| `request` | Plain string | `spec.request` |
+| `alertName` | String | Used by `resolveAlertConfigMap` to match incoming alert names |
+| `alertGroupName` | String | Prometheus rule group name (system alerts only) |
+| `alertRule` | YAML block scalar | The `- alert: ...` rule body included in Thanos rule groups |
+| `alertMetrics` | JSON array string | Metric names added to the MCO allowlist |
+| `request` | Plain string | `spec.request` in the AgenticRun |
 | `skills` | JSON array of `{image, paths[]}` | `spec.tools.skills` |
 | `mcpServers` | JSON array of `{name, url, timeoutSeconds?}` | `spec.tools.mcpServers` |
 
 An absent key, empty string, or empty JSON array (`[]`) causes the corresponding field to be omitted from the AgenticRun spec. If `request` is empty the AgenticRun is skipped with an error log.
-
-These ConfigMaps are deployed as static manifests (`config/manager/agenticrun-configs.yaml`) and the controller also ensures they exist at startup via `ensureAgenticRunConfigs` (create-if-absent, never overwrite).
 
 ### Variable expansion in ConfigMap values
 
@@ -409,48 +413,36 @@ Managed by `reconcileAlertRules` in `internal/controller/alertrules.go`.
 **Key:** `custom_rules.yaml`  
 **Labels:** `app.kubernetes.io/managed-by: telco-anomaly-detection`
 
-The ConfigMap is created or updated on every reconcile based on the `spec.alerts` field. The Thanos Ruler config-reload sidecar picks up changes automatically.
+The ConfigMap is created or updated on every reconcile. `reconcileAlertRules` lists alert ConfigMaps in the operator namespace with labels `ran.openshift.io/system-managed-alert: "true"` (always) and `ran.openshift.io/user-managed-alert: "true"` (when `spec.alerts.userAlerts` is true). It builds Prometheus rule groups from their `alertRule` fields using `alertGroupName` (or `telco-user-<alertname-lowercased>` for user alerts). The Thanos Ruler config-reload sidecar picks up changes automatically.
 
 ### Current alert rules
 
-| Alert name | Enabled by | Expression |
-|---|---|---|
-| `TelcoHealthCheckHostNetwork` | `spec.alerts.hostNetwork: true` | `sum by (clusterID, cluster, instance, prometheus) (instance:node_network_receive_drop_excluding_lo:rate1m > 1)` or transmit equivalent |
-| `TelcoHealthCheckPodNetwork` | `spec.alerts.podNetwork: true` | `sum by (clusterID, cluster, instance, pod) (container_network_receive_errors_total > 1)` or receive drops / transmit errors / transmit drops equivalents |
-| `TelcoHealthCheckHostReservedCPU` | `spec.alerts.hostReservedCPU: true` | `openshift:cpu_usage_cores:sum > 3` |
-| `TelcoHealthCheckOVSProcessCPU` | `spec.alerts.ovsProcessCPU: true` | `irate(ovs_db_process_cpu_seconds_total[10m]) > 1.0 or irate(ovs_vswitchd_process_cpu_seconds_total[10m]) > 1.0` |
-| User-defined (any name) | `spec.alerts.userAlerts: true` + user ConfigMap | Provided by user in `alertRule` field |
+| Alert name | Spec flag | Group name | Asset file |
+|---|---|---|---|
+| `TelcoHealthCheckHostNetwork` | `spec.alerts.hostNetwork` | `telco-host-network` | `assets/alert-host-network.yaml` |
+| `TelcoHealthCheckPodNetwork` | `spec.alerts.podNetwork` | `telco-pod-network` | `assets/alert-pod-network.yaml` |
+| `TelcoHealthCheckHostReservedCPU` | `spec.alerts.hostReservedCPU` | `telco-host-reserved-cpu` | `assets/alert-host-reserved-cpu.yaml` |
+| `TelcoHealthCheckOVSProcessCPU` | `spec.alerts.ovsProcessCPU` | `telco-ovs-process-cpu` | `assets/alert-ovs-process-cpu.yaml` |
+| User-defined (any name) | `spec.alerts.userAlerts: true` | `alertGroupName` or `telco-user-<name>` | User ConfigMap |
+
+### System-alert asset files
+
+The four system alerts are defined in YAML files under `internal/controller/assets/`, embedded in the controller binary via `//go:embed` in `internal/controller/systemalerts.go`. Each file is a complete ConfigMap definition (all seven data fields). The controller creates or updates the ConfigMap in the operator namespace on every reconcile when the spec boolean is enabled, and deletes it when disabled.
 
 ### User-defined alert ConfigMaps
 
-When `spec.alerts.userAlerts: true`, the controller discovers additional alert rules from ConfigMaps in the operator namespace that carry both of the following labels:
+When `spec.alerts.userAlerts: true`, the controller includes ConfigMaps in the operator namespace that carry both of the following labels:
 
 ```
 app.kubernetes.io/managed-by: telco-anomaly-detection
 ran.openshift.io/user-managed-alert: "true"
 ```
 
-**Required data keys:**
+All seven data fields apply (see ConfigMap data keys table above). `alertGroupName` defaults to `telco-user-<alertname-lowercased>` when absent.
 
-| Key | Description |
-|---|---|
-| `alertName` | A unique identifier for this alert; must exactly match the `alert:` name inside `alertRule`. |
-| `alertRule` | Complete Prometheus rule block starting with `- alert: <name>`. |
+**Controller watch:** the controller watches ConfigMaps with both required user-alert labels (namespace-scoped). Any create, update, or delete of a matching ConfigMap immediately re-enqueues all `TelcoHealthcheck` CRs in the same namespace.
 
-**Optional data keys:**
-
-| Key | Description |
-|---|---|
-| `alertMetrics` | JSON array of metric name strings to add to the MCO custom allowlist. |
-| `request` | AgenticRun `spec.request` prompt for this alert. |
-| `skills` | JSON array of `{image, paths[]}` — same format as system config ConfigMaps. |
-| `mcpServers` | JSON array of `{name, url}` — same format as system config ConfigMaps. |
-
-**Group naming:** the controller auto-derives the Thanos rule group name as `telco-user-<alertname-lowercased>`.
-
-**Controller watch:** the controller watches ConfigMaps with both required labels (namespace-scoped). Any create, update, or delete of a matching ConfigMap immediately re-enqueues all `TelcoHealthcheck` CRs in the same namespace.
-
-**Alert receiver:** when a firing alert's name is not in the static `alertConfigMaps` map, `resolveAlertConfigMap` searches user-alert ConfigMaps in the operator namespace and matches by `alertName` data key. The matched ConfigMap is used as the AgenticRun configuration source.
+**Alert receiver:** `resolveAlertConfigMap` lists all ConfigMaps in the operator namespace with label `app.kubernetes.io/managed-by: telco-anomaly-detection` and matches by `data["alertName"]`, accepting both system-alert and user-alert labels. No static routing table is used.
 
 **Example:**
 
@@ -516,19 +508,19 @@ Managed by `reconcileObservabilityMetrics` in `internal/controller/observability
 
 Applied on the hub cluster, this ConfigMap is picked up by MCO and propagated to the `metrics-collector` on every managed cluster, extending the set of metrics forwarded to the hub's Thanos Receive.
 
-The ConfigMap content is computed by `buildMetricsListYAML` from `spec.alerts`. When all alert flags are false the key is written with `names: []` (inert but present). On CR deletion the ConfigMap is removed.
+The ConfigMap content is computed by `buildMetricsListYAML` from the unified list of system-alert and user-alert ConfigMaps (same listing pattern as `reconcileAlertRules`). Metric names are deduplicated across all alert configs. When no alerts provide metrics, the key is written with `names: []` (inert but present). On CR deletion the ConfigMap is removed.
 
 ### Current metric groups
 
-| Metric | Enabled by |
+| Metric | Comes from |
 |---|---|
-| `container_network_receive_errors_total` | `spec.alerts.podNetwork: true` |
-| `container_network_receive_packets_dropped_total` | `spec.alerts.podNetwork: true` |
-| `container_network_transmit_errors_total` | `spec.alerts.podNetwork: true` |
-| `container_network_transmit_packets_dropped_total` | `spec.alerts.podNetwork: true` |
-| `openshift:cpu_usage_cores:sum` | `spec.alerts.hostReservedCPU: true` |
-| `ovs_db_process_cpu_seconds_total` | `spec.alerts.ovsProcessCPU: true` |
-| `ovs_vswitchd_process_cpu_seconds_total` | `spec.alerts.ovsProcessCPU: true` |
+| `container_network_receive_errors_total` | `assets/alert-pod-network.yaml` (`spec.alerts.podNetwork`) |
+| `container_network_receive_packets_dropped_total` | `assets/alert-pod-network.yaml` |
+| `container_network_transmit_errors_total` | `assets/alert-pod-network.yaml` |
+| `container_network_transmit_packets_dropped_total` | `assets/alert-pod-network.yaml` |
+| `openshift:cpu_usage_cores:sum` | `assets/alert-host-reserved-cpu.yaml` (`spec.alerts.hostReservedCPU`) |
+| `ovs_db_process_cpu_seconds_total` | `assets/alert-ovs-process-cpu.yaml` (`spec.alerts.ovsProcessCPU`) |
+| `ovs_vswitchd_process_cpu_seconds_total` | `assets/alert-ovs-process-cpu.yaml` |
 
 ### Future enhancement: namespace-scoped collection
 
@@ -594,15 +586,13 @@ Creates the `telco-healthcheck-system` namespace with Pod Security Standards lab
 
 ### `config/manager/agenticrun-configs.yaml`
 
-Four ConfigMaps deployed alongside the operator (some with real `request` prompts, others still placeholder):
+One ConfigMap deployed alongside the operator:
 
-- `telco-anomaly-host-network-config` — real `request` prompt
-- `telco-anomaly-pod-network-config` — placeholder `request`
-- `telco-anomaly-host-reserved-cpu-config` — real `request` prompt
-- `telco-anomaly-rds-compliance-config` — real `request` prompt; `mcpServers` wired to `${KUBE_COMPARE_MCP_URL}`
-- `telco-anomaly-ovs-process-cpu-config` — real `request` prompt for OVS process CPU investigation
+- `telco-anomaly-rds-compliance-config` — real `request` prompt; `mcpServers` wired to `${KUBE_COMPARE_MCP_URL}`; `skills` references the RDS compliance skill image
 
-Edit these to supply real `request`, `skills`, and `mcpServers` values. The controller never overwrites them after initial creation.
+The four alert-type ConfigMaps (`telco-anomaly-host-network-config`, `telco-anomaly-pod-network-config`, `telco-anomaly-host-reserved-cpu-config`, `telco-anomaly-ovs-process-cpu-config`) are no longer pre-installed here. They are managed at runtime by `reconcileSystemAlertConfigMaps` from the embedded asset files in `internal/controller/assets/`.
+
+Edit `telco-anomaly-rds-compliance-config` to supply real `request`, `skills`, and `mcpServers` values. The controller never overwrites it after initial creation.
 
 ### `config/crd/bases/ran.openshift.io_telcohealthchecks.yaml`
 

@@ -10,8 +10,6 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
-
-	ranv1alpha1 "github.com/javierpena/telco-anomaly-detection/api/v1alpha1"
 )
 
 const (
@@ -20,21 +18,26 @@ const (
 )
 
 // reconcileObservabilityMetrics creates or updates the observability-metrics-custom-allowlist
-// ConfigMap in the open-cluster-management-observability namespace. The metric list is driven
-// by the alerts field in the TelcoHealthcheck spec; additional metrics can be appended here
-// as new alert types are introduced in future phases.
-func reconcileObservabilityMetrics(ctx context.Context, c client.Client, alerts ranv1alpha1.AlertsSpec, userAlerts []UserAlertConfig) error {
+// ConfigMap in the open-cluster-management-observability namespace. It lists system-alert and
+// (when enabled) user-alert ConfigMaps in namespace and builds the metric list from their
+// alertMetrics fields.
+func reconcileObservabilityMetrics(ctx context.Context, c client.Client, namespace string, userAlertsEnabled bool) error {
 	logger := log.FromContext(ctx)
 	logger.Info("reconciling observability metrics allowlist",
-		"podNetwork", alerts.PodNetwork,
-		"userAlerts", alerts.UserAlerts)
+		"namespace", namespace,
+		"userAlertsEnabled", userAlertsEnabled)
 
-	metricsContent := buildMetricsListYAML(alerts, userAlerts)
+	allAlerts, err := listAllAlertConfigs(ctx, c, namespace, userAlertsEnabled)
+	if err != nil {
+		return fmt.Errorf("listing alert configs for metrics: %w", err)
+	}
+
+	metricsContent := buildMetricsListYAML(allAlerts)
 	logger.V(1).Info("built metrics_list.yaml", "content", metricsContent)
 
 	existing := &corev1.ConfigMap{}
 	key := types.NamespacedName{Name: observabilityMetricsConfigMap, Namespace: observabilityNamespace}
-	err := c.Get(ctx, key, existing)
+	err = c.Get(ctx, key, existing)
 
 	if errors.IsNotFound(err) {
 		cm := &corev1.ConfigMap{
@@ -93,33 +96,17 @@ func cleanupObservabilityMetrics(ctx context.Context, c client.Client) error {
 }
 
 // buildMetricsListYAML produces the metrics_list.yaml content for the MCO custom allowlist.
-// Metric groups are included or omitted based on the alerts spec and user-defined alerts.
-func buildMetricsListYAML(alerts ranv1alpha1.AlertsSpec, userAlerts []UserAlertConfig) string {
+// Metric names are deduplicated across all provided alert configs.
+func buildMetricsListYAML(allAlerts []UserAlertConfig) string {
+	seen := make(map[string]bool)
 	var names []string
 
-	if alerts.PodNetwork {
-		names = append(names,
-			"container_network_receive_errors_total",
-			"container_network_receive_packets_dropped_total",
-			"container_network_transmit_errors_total",
-			"container_network_transmit_packets_dropped_total",
-		)
-	}
-
-	if alerts.HostReservedCPU {
-		names = append(names, "openshift:cpu_usage_cores:sum")
-	}
-
-	if alerts.OVSProcessCPU {
-		names = append(names,
-			"ovs_db_process_cpu_seconds_total",
-			"ovs_vswitchd_process_cpu_seconds_total",
-		)
-	}
-
-	if alerts.UserAlerts {
-		for _, ua := range userAlerts {
-			names = append(names, ua.AlertMetrics...)
+	for _, a := range allAlerts {
+		for _, m := range a.AlertMetrics {
+			if !seen[m] {
+				seen[m] = true
+				names = append(names, m)
+			}
 		}
 	}
 

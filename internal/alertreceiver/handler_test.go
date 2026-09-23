@@ -125,6 +125,28 @@ func makeAgenticRunConfigMapWithRequest(name, namespace, request string) *unstru
 	return cm
 }
 
+// makeSystemAlertConfigMap returns a corev1 ConfigMap with system-alert labels and all
+// required data fields so resolveAlertConfigMap can find it in tests.
+func makeSystemAlertConfigMap(name, namespace, alertName, request string) *corev1.ConfigMap {
+	return &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: namespace,
+			Labels: map[string]string{
+				userAlertManagedByLabel: userAlertManagedByValue,
+				systemAlertLabel:        systemAlertLabelValue,
+			},
+		},
+		Data: map[string]string{
+			"alertName":  alertName,
+			"alertRule":  "- alert: " + alertName + "\n  expr: up == 0",
+			"request":    request,
+			"skills":     "[]",
+			"mcpServers": "[]",
+		},
+	}
+}
+
 func TestProcessAlerts_MatchCreatesAgenticRun(t *testing.T) {
 	scheme := newHandlerScheme(t)
 
@@ -133,7 +155,7 @@ func TestProcessAlerts_MatchCreatesAgenticRun(t *testing.T) {
 	thc := makeTHCWithMonitoredClusters("test", "default", []string{"cluster-a"})
 	kubeSecret := makeKubeconfigSecretUnstructured("cluster-a")
 	alertCM := makeAlertNamesConfigMap([]string{alertName})
-	configCM := makeAgenticRunConfigMapUnstructured("telco-anomaly-host-network-config", operatorNamespace)
+	configCM := makeSystemAlertConfigMap("telco-anomaly-host-network-config", operatorNamespace, alertName, "check host network")
 
 	hubClient := fake.NewClientBuilder().WithScheme(scheme).
 		WithStatusSubresource(thc).
@@ -296,8 +318,8 @@ func TestProcessAlerts_NodeNameExpandedInRequest(t *testing.T) {
 	thc := makeTHCWithMonitoredClusters("test", "default", []string{"cluster-a"})
 	kubeSecret := makeKubeconfigSecretUnstructured("cluster-a")
 	alertCM := makeAlertNamesConfigMap([]string{alertName})
-	configCM := makeAgenticRunConfigMapWithRequest(
-		"telco-anomaly-ovs-process-cpu-config", operatorNamespace,
+	configCM := makeSystemAlertConfigMap(
+		"telco-anomaly-ovs-process-cpu-config", operatorNamespace, alertName,
 		"cluster=${CLUSTER_NAME} node=${NODE_NAME}",
 	)
 
@@ -366,18 +388,17 @@ func makeUserAlertConfigMap(name, namespace, alertName string) *corev1.ConfigMap
 	}
 }
 
-func TestResolveAlertConfigMap_StaticMapTakesPrecedence(t *testing.T) {
+func TestResolveAlertConfigMap_SystemAlertFound(t *testing.T) {
 	scheme := newHandlerScheme(t)
-	// Add a user ConfigMap for a system alert name — static map must win.
-	userCM := makeUserAlertConfigMap("user-host-network", operatorNamespace, "TelcoHealthCheckHostNetwork")
-	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(userCM).Build()
+	sysCM := makeSystemAlertConfigMap("telco-anomaly-host-network-config", operatorNamespace, "TelcoHealthCheckHostNetwork", "check host network")
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(sysCM).Build()
 
 	name, err := resolveAlertConfigMap(context.Background(), c, "TelcoHealthCheckHostNetwork", operatorNamespace)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if name != "telco-anomaly-host-network-config" {
-		t.Errorf("expected static map result, got %q", name)
+		t.Errorf("expected system CM name, got %q", name)
 	}
 }
 

@@ -3,7 +3,6 @@ package controller
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 
 	corev1 "k8s.io/api/core/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -20,12 +19,38 @@ const (
 	userAlertLabelValue     = "true"
 )
 
-// UserAlertConfig holds the parsed contents of a user-defined alert ConfigMap.
+// UserAlertConfig holds the parsed contents of an alert ConfigMap (system or user-defined).
 type UserAlertConfig struct {
 	AlertName     string
+	GroupName     string // from alertGroupName data key; empty for user alerts (builder defaults to telco-user-<alertname>)
 	AlertRule     string
 	AlertMetrics  []string
 	ConfigMapName string
+}
+
+// parseAlertConfigMap extracts an UserAlertConfig from a ConfigMap's data fields.
+// Returns false when alertName or alertRule are absent, or alertMetrics JSON is malformed.
+func parseAlertConfigMap(cm corev1.ConfigMap) (UserAlertConfig, bool) {
+	name := cm.Data["alertName"]
+	rule := cm.Data["alertRule"]
+	if name == "" || rule == "" {
+		return UserAlertConfig{}, false
+	}
+
+	var metrics []string
+	if raw := cm.Data["alertMetrics"]; raw != "" && raw != "[]" {
+		if err := json.Unmarshal([]byte(raw), &metrics); err != nil {
+			return UserAlertConfig{}, false
+		}
+	}
+
+	return UserAlertConfig{
+		AlertName:     name,
+		GroupName:     cm.Data["alertGroupName"],
+		AlertRule:     rule,
+		AlertMetrics:  metrics,
+		ConfigMapName: cm.Name,
+	}, true
 }
 
 // listUserAlertConfigs returns the parsed contents of all user-alert ConfigMaps in namespace.
@@ -47,29 +72,13 @@ func listUserAlertConfigs(ctx context.Context, c client.Client, namespace string
 
 	var configs []UserAlertConfig
 	for _, cm := range cmList.Items {
-		name := cm.Data["alertName"]
-		rule := cm.Data["alertRule"]
-		if name == "" || rule == "" {
-			logger.Info("user-alert ConfigMap missing alertName or alertRule, skipping",
+		cfg, ok := parseAlertConfigMap(cm)
+		if !ok {
+			logger.Info("user-alert ConfigMap missing alertName, alertRule, or has invalid alertMetrics, skipping",
 				"configmap", cm.Name)
 			continue
 		}
-
-		var metrics []string
-		if raw := cm.Data["alertMetrics"]; raw != "" {
-			if err := json.Unmarshal([]byte(raw), &metrics); err != nil {
-				logger.Info("user-alert ConfigMap has invalid alertMetrics JSON, skipping",
-					"configmap", cm.Name, "error", fmt.Sprintf("%v", err))
-				continue
-			}
-		}
-
-		configs = append(configs, UserAlertConfig{
-			AlertName:     name,
-			AlertRule:     rule,
-			AlertMetrics:  metrics,
-			ConfigMapName: cm.Name,
-		})
+		configs = append(configs, cfg)
 	}
 	return configs, nil
 }

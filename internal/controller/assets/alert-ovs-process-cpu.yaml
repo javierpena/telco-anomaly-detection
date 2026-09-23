@@ -1,0 +1,34 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: telco-anomaly-ovs-process-cpu-config
+  labels:
+    app.kubernetes.io/managed-by: telco-anomaly-detection
+    ran.openshift.io/system-managed-alert: "true"
+data:
+  alertName: TelcoHealthCheckOVSProcessCPU
+  alertGroupName: telco-ovs-process-cpu
+  alertRule: |
+    - alert: TelcoHealthCheckOVSProcessCPU
+      expr: irate(ovs_db_process_cpu_seconds_total[10m]) > 1.0 or irate(ovs_vswitchd_process_cpu_seconds_total[10m]) > 1.0
+      for: 1m
+      labels:
+        severity: warning
+      annotations:
+        cluster: '{{ $labels.cluster }}'
+        node: '{{ $labels.instance }}'
+  alertMetrics: '["ovs_db_process_cpu_seconds_total","ovs_vswitchd_process_cpu_seconds_total"]'
+  request: |
+    You are an experienced OpenShift administrator. Alert TelcoHealthCheckOVSProcessCPU
+    has been raised for cluster ${CLUSTER_NAME}, node ${NODE_NAME}. One or both OVS
+    processes (ovsdb-server or ovs-vswitchd) is consuming more than 100% of a single
+    CPU core. Investigate by:
+    1) Checking the current CPU usage of OVS processes on the affected nodes.
+    2) Reviewing OVN/OVS logs for errors or high-churn flow programming events.
+    3) Checking the number of active flows and ports in OVS on the affected nodes.
+    4) Looking for recent changes in NetworkPolicy or OVN topology that could increase
+       flow processing load.
+    5) Checking overall node resource pressure (CPU throttling, load average).
+    Identify the root cause and suggest remediation steps.
+  skills: "[]"
+  mcpServers: "[]"

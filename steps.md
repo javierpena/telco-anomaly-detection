@@ -90,6 +90,21 @@
 - [x] Define what "RDS compliance" checks entail
 - [x] Implement a dedicated AgenticRun configuration for RDS compliance checks
 
+## Phase 12: System Alert Migration to Asset-Based ConfigMaps ✅
+
+- [x] Create four YAML asset files in `internal/controller/assets/` (one per system alert) containing alertName, alertGroupName, alertRule, alertMetrics, request, skills, mcpServers
+- [x] Create `internal/controller/systemalerts.go` with `//go:embed` directives, `reconcileSystemAlertConfigMaps`, and `cleanupSystemAlertConfigMaps`
+- [x] Add `GroupName` field to `UserAlertConfig`; extract `parseAlertConfigMap` helper in `useralerts.go`
+- [x] Rewrite `alertrules.go` with generic `buildCustomRulesYAML([]UserAlertConfig)` and updated `reconcileAlertRules(ctx, c, namespace, userAlertsEnabled)`; add `listAllAlertConfigs` helper
+- [x] Rewrite `observabilitymetrics.go` with generic `buildMetricsListYAML([]UserAlertConfig)` (with deduplication) and updated `reconcileObservabilityMetrics`
+- [x] Shrink `agenticrunconfig.go` to manage only `telco-anomaly-rds-compliance-config`
+- [x] Update reconcile loop: add `reconcileSystemAlertConfigMaps` call (before `ensureAgenticRunConfigs`), remove user-alert collection block, update function signatures, add `cleanupSystemAlertConfigMaps` to cleanup
+- [x] Remove static `alertConfigMaps` map from `handler.go`; rewrite `resolveAlertConfigMap` to use unified label-based lookup
+- [x] Remove four alert ConfigMaps from `config/manager/agenticrun-configs.yaml`
+- [x] Rewrite `alertrules_test.go` for new generic API; add `systemalerts_test.go`; update `observabilitymetrics_test.go` and `handler_test.go`
+- [x] Update `docs/adding-a-new-alert.md` (two workflows: system dev and user operator)
+- [x] Update `docs/architecture.md` (reconcile loop, cleanup, Thanos/MCO sections, AgenticRun config table, assets description)
+
 ## Verification Commands
 
 ```bash

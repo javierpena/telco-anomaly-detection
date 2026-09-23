@@ -33,21 +33,15 @@ const (
 	customRulesKey         = "custom_rules.yaml"
 	observabilityNamespace = "open-cluster-management-observability"
 
-	// Labels that identify user-defined alert ConfigMaps (duplicated from the controller package
+	// Labels that identify alert ConfigMaps (duplicated from the controller package
 	// to avoid a cross-binary import dependency).
 	userAlertManagedByLabel = "app.kubernetes.io/managed-by"
 	userAlertManagedByValue = "telco-anomaly-detection"
 	userAlertLabel          = "ran.openshift.io/user-managed-alert"
 	userAlertLabelValue     = "true"
+	systemAlertLabel        = "ran.openshift.io/system-managed-alert"
+	systemAlertLabelValue   = "true"
 )
-
-// alertConfigMaps maps an AlertManager alert name to the ConfigMap that holds its AgenticRun config.
-var alertConfigMaps = map[string]string{
-	"TelcoHealthCheckHostNetwork":     "telco-anomaly-host-network-config",
-	"TelcoHealthCheckPodNetwork":      "telco-anomaly-pod-network-config",
-	"TelcoHealthCheckHostReservedCPU": "telco-anomaly-host-reserved-cpu-config",
-	"TelcoHealthCheckOVSProcessCPU":   "telco-anomaly-ovs-process-cpu-config",
-}
 
 // AlertManagerPayload is the top-level payload sent by AlertManager webhooks.
 type AlertManagerPayload struct {
@@ -330,25 +324,21 @@ func fetchKubeconfig(ctx context.Context, c client.Client, clusterName string) (
 }
 
 // resolveAlertConfigMap returns the ConfigMap name that holds AgenticRun config for alertName.
-// It checks the static alertConfigMaps map first; if not found it falls back to user-defined
-// alert ConfigMaps labeled with both userAlertManagedByLabel and userAlertLabel.
+// It lists all managed ConfigMaps in namespace and matches by alertName data field,
+// accepting both system-alert (ran.openshift.io/system-managed-alert) and user-alert
+// (ran.openshift.io/user-managed-alert) ConfigMaps in a single pass.
 func resolveAlertConfigMap(ctx context.Context, c client.Client, alertName, namespace string) (string, error) {
-	if name, ok := alertConfigMaps[alertName]; ok {
-		return name, nil
-	}
-
 	var cmList corev1.ConfigMapList
 	if err := c.List(ctx, &cmList,
 		client.InNamespace(namespace),
-		client.MatchingLabels{
-			userAlertManagedByLabel: userAlertManagedByValue,
-			userAlertLabel:          userAlertLabelValue,
-		},
+		client.MatchingLabels{userAlertManagedByLabel: userAlertManagedByValue},
 	); err != nil {
 		return "", err
 	}
 	for _, cm := range cmList.Items {
-		if cm.Data["alertName"] == alertName {
+		isSystem := cm.Labels[systemAlertLabel] == systemAlertLabelValue
+		isUser := cm.Labels[userAlertLabel] == userAlertLabelValue
+		if (isSystem || isUser) && cm.Data["alertName"] == alertName {
 			return cm.Name, nil
 		}
 	}

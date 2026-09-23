@@ -9,13 +9,11 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-// agenticRunConfigMapNames lists all AgenticRun configuration ConfigMaps managed by the operator.
+// agenticRunConfigMapNames lists AgenticRun configuration ConfigMaps that are not managed
+// as embedded system-alert assets. The four alert-type ConfigMaps are now managed by
+// reconcileSystemAlertConfigMaps; only the RDS compliance config remains here.
 var agenticRunConfigMapNames = []string{
-	"telco-anomaly-host-network-config",
-	"telco-anomaly-pod-network-config",
 	"telco-anomaly-rds-compliance-config",
-	"telco-anomaly-host-reserved-cpu-config",
-	"telco-anomaly-ovs-process-cpu-config",
 }
 
 // ensureAgenticRunConfigs creates the AgenticRun configuration ConfigMaps in namespace if they

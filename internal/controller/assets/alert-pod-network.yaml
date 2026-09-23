@@ -1,0 +1,26 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: telco-anomaly-pod-network-config
+  labels:
+    app.kubernetes.io/managed-by: telco-anomaly-detection
+    ran.openshift.io/system-managed-alert: "true"
+data:
+  alertName: TelcoHealthCheckPodNetwork
+  alertGroupName: telco-pod-network
+  alertRule: |
+    - alert: TelcoHealthCheckPodNetwork
+      expr: sum by (clusterID, cluster, instance, pod) (container_network_receive_errors_total > 1) or sum by (clusterID, cluster, instance, pod) (container_network_receive_packets_dropped_total > 1) or sum by (clusterID, cluster, instance, pod) (container_network_transmit_errors_total > 1) or sum by (clusterID, cluster, instance, pod) (container_network_transmit_packets_dropped_total > 1)
+      for: 1m
+      labels:
+        severity: warning
+      annotations:
+        cluster: '{{ $labels.cluster }}'
+        node: '{{ $labels.instance }}'
+        pod: '{{ $labels.pod }}'
+        interface: '{{ $labels.interface }}'
+        namespace: '{{ $labels.namespace }}'
+  alertMetrics: '["container_network_receive_errors_total","container_network_receive_packets_dropped_total","container_network_transmit_errors_total","container_network_transmit_packets_dropped_total"]'
+  request: "test"
+  skills: "[]"
+  mcpServers: "[]"

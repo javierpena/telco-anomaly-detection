@@ -91,6 +91,13 @@ func (r *TelcoHealthcheckReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		}
 	}
 
+	// Reconcile system-alert ConfigMaps from embedded assets (create/update when enabled, delete when disabled).
+	// Must run before reconcileAlertRules so the rule listing sees up-to-date system ConfigMaps.
+	if err := reconcileSystemAlertConfigMaps(ctx, r.Client, r.OperatorNamespace, thc.Spec.Alerts); err != nil {
+		logger.Error(err, "failed to reconcile system alert ConfigMaps")
+		return ctrl.Result{}, err
+	}
+
 	// Ensure AgenticRun configuration ConfigMaps exist (create-if-absent; never overwrite).
 	if err := ensureAgenticRunConfigs(ctx, r.Client, r.OperatorNamespace); err != nil {
 		logger.Error(err, "failed to ensure AgenticRun config ConfigMaps")
@@ -112,23 +119,14 @@ func (r *TelcoHealthcheckReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	}
 	thc.Status.MonitoredClusters = monitoredClusters
 
-	// Collect user-defined alert configs when the feature is enabled.
-	var userAlerts []UserAlertConfig
-	if thc.Spec.Alerts.UserAlerts {
-		userAlerts, err = listUserAlertConfigs(ctx, r.Client, req.Namespace)
-		if err != nil {
-			return ctrl.Result{}, fmt.Errorf("listing user alert configs: %w", err)
-		}
-	}
-
-	// Reconcile Thanos alert rules.
-	if err := reconcileAlertRules(ctx, r.Client, thc.Spec, userAlerts); err != nil {
+	// Reconcile Thanos alert rules (lists system and user ConfigMaps internally).
+	if err := reconcileAlertRules(ctx, r.Client, r.OperatorNamespace, thc.Spec.Alerts.UserAlerts); err != nil {
 		logger.Error(err, "failed to reconcile alert rules")
 		// Non-fatal: log and continue so the rest of the reconcile proceeds.
 	}
 
-	// Reconcile MCO custom metrics allowlist.
-	if err := reconcileObservabilityMetrics(ctx, r.Client, thc.Spec.Alerts, userAlerts); err != nil {
+	// Reconcile MCO custom metrics allowlist (lists system and user ConfigMaps internally).
+	if err := reconcileObservabilityMetrics(ctx, r.Client, r.OperatorNamespace, thc.Spec.Alerts.UserAlerts); err != nil {
 		logger.Error(err, "failed to reconcile observability metrics allowlist")
 		// Non-fatal: log and continue.
 	}
@@ -204,6 +202,12 @@ func (r *TelcoHealthcheckReconciler) cleanupResources(
 	}
 	if err := cleanupObservabilityMetrics(ctx, r.Client); err != nil {
 		logger.Error(err, "failed to cleanup observability metrics allowlist")
+		if firstErr == nil {
+			firstErr = err
+		}
+	}
+	if err := cleanupSystemAlertConfigMaps(ctx, r.Client, r.OperatorNamespace); err != nil {
+		logger.Error(err, "failed to cleanup system alert ConfigMaps")
 		if firstErr == nil {
 			firstErr = err
 		}

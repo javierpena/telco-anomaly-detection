@@ -1,0 +1,24 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: telco-anomaly-host-reserved-cpu-config
+  labels:
+    app.kubernetes.io/managed-by: telco-anomaly-detection
+    ran.openshift.io/system-managed-alert: "true"
+data:
+  alertName: TelcoHealthCheckHostReservedCPU
+  alertGroupName: telco-host-reserved-cpu
+  alertRule: |
+    - alert: TelcoHealthCheckHostReservedCPU
+      expr: "openshift:cpu_usage_cores:sum > 3"
+      for: 1m
+      labels:
+        severity: warning
+      annotations:
+        cluster: '{{ $labels.cluster }}'
+  alertMetrics: '["openshift:cpu_usage_cores:sum"]'
+  request: |
+    You are an experienced OpenShift administrator. Alert TelcoHealthCheckHostReservedCPU has been raised for this cluster. This means the reserved CPUs, as defined by the PerformanceProfile resource, have a very high usage.
+    Analyze usage on the reserved CPUs, find potential root causes for the high usage, and propose any remediation steps as needed to reduce the CPU usage in the reserved CPUs.
+  skills: '[{"image":"quay.io/javierpena/telco-anomaly-skills:latest","paths":["/skills/check-reserved-cpu-usage"]}]'
+  mcpServers: "[]"

@@ -1,6 +1,8 @@
-# Adding a New Alert to the Alert Receiver
+# Adding a New Alert
 
-This document describes every change required to introduce a new alert that the alert receiver will act on. Each step is mandatory; skipping any one of them causes the alert to be silently dropped.
+There are two workflows depending on whether the alert is a **system alert** (part of the operator release) or a **user-defined alert** (added at runtime without a code change).
+
+---
 
 ## Overview of the pipeline
 
@@ -8,196 +10,187 @@ This document describes every change required to introduce a new alert that the 
 TelcoHealthcheck CR (spec.alerts.<flag>: true)
         │
         ▼  controller reconcile
-Thanos Ruler ConfigMap  ──►  alert fires  ──►  AlertManager  ──►  POST /webhook
-        │                                                               │
-        │  (alert name validation)                                      │
-        ▼                                                               ▼
-alertConfigMaps lookup (handler.go)  ──►  AgenticRun config ConfigMap
-        │
-        ▼
-AgenticRun created on spoke cluster
-```
-
-A new alert touches five distinct places: the API type, the Thanos rule, the metrics allowlist, the alert-to-ConfigMap routing table, and the AgenticRun config ConfigMap.
-
----
-
-## Step 1 — Add a spec field to the API type
-
-Add a boolean field to `AlertsSpec` in `api/v1alpha1/telcohealthcheck_types.go`:
-
-```go
-// AlertsSpec controls which categories of alerts are forwarded to the alert receiver.
-type AlertsSpec struct {
-    HostNetwork     bool `json:"hostNetwork"`
-    PodNetwork      bool `json:"podNetwork"`
-    HostReservedCPU bool `json:"hostReservedCPU"`
-    MyNewAlert      bool `json:"myNewAlert"`   // add this
-}
-```
-
-After editing the type, regenerate the CRD YAML and DeepCopy methods:
-
-```bash
-make generate   # regenerates zz_generated.deepcopy.go
-make manifests  # regenerates config/crd/bases/ran.openshift.io_telcohealthchecks.yaml
+System-alert ConfigMaps (embedded assets) ──► reconcileAlertRules ──► Thanos Ruler ConfigMap
+        │                                                                       │
+        │                                                        alert fires ──►│
+        │                                                                       ▼
+        │                                                              AlertManager
+        │                                                                       │
+        │                                                              POST /webhook
+        │                                                                       │
+        └─── resolveAlertConfigMap (label-based lookup) ────────────────────────┘
+                        │
+                        ▼
+                AgenticRun config (from the same CM)
+                        │
+                        ▼
+                AgenticRun created on spoke cluster
 ```
 
 ---
 
-## Step 2 — Write the Thanos alert rule
+## Workflow 1: Adding a system alert (operator developer — requires a release)
 
-Add a rule-group function and wire it into `buildCustomRulesYAML` in `internal/controller/alertrules.go`.
+A system alert is packaged with the operator. Its full definition (rule, metrics, AgenticRun prompt) lives in a single YAML asset file embedded in the controller binary.
 
-**2a. Add the rule group function:**
+### Step 1 — Create the asset YAML file
 
-```go
-func myNewAlertRuleGroup() string {
-    return `  - name: telco-my-new-alert
-    rules:
-      - alert: TelcoHealthCheckMyNewAlert
-        expr: <prometheus_expression>
-        for: 1m
-        labels:
-          severity: warning
-        annotations:
-          cluster: '{{ $labels.cluster }}'
-`
-}
-```
-
-The `alert:` value (`TelcoHealthCheckMyNewAlert`) is the alert name that AlertManager will put in `labels.alertname`. It must be unique within the rule file and match exactly what you register in Step 4.
-
-**2b. Call the function from `buildCustomRulesYAML`:**
-
-```go
-func buildCustomRulesYAML(alerts ranv1alpha1.AlertsSpec) string {
-    if !alerts.HostNetwork && !alerts.PodNetwork && !alerts.HostReservedCPU && !alerts.MyNewAlert {
-        return "groups: []\n"
-    }
-    content := "groups:\n"
-    // existing blocks …
-    if alerts.MyNewAlert {
-        content += myNewAlertRuleGroup()
-    }
-    return content
-}
-```
-
-The controller writes this ConfigMap to `thanos-ruler-custom-rules` in `open-cluster-management-observability` on every reconcile. Thanos Ruler reloads the rules automatically via its config-reload sidecar.
-
----
-
-## Step 3 — Extend the MCO metrics allowlist (if needed)
-
-If the alert expression references metrics that are not already scraped by the MCO observability addon, add them to `buildMetricsListYAML` in `internal/controller/observabilitymetrics.go`:
-
-```go
-func buildMetricsListYAML(alerts ranv1alpha1.AlertsSpec) string {
-    var names []string
-    // existing blocks …
-    if alerts.MyNewAlert {
-        names = append(names, "my_new_metric_total")
-    }
-    // …
-}
-```
-
-The `observability-metrics-custom-allowlist` ConfigMap is propagated by MCO to every spoke cluster's `metrics-collector`, extending the set of metrics forwarded to the hub's Thanos Receive. Metrics already included in MCO's default recording rules (such as `instance:node_network_*` aggregations) do not need to be listed here.
-
----
-
-## Step 4 — Register the alert name in the receiver routing table
-
-In `internal/alertreceiver/handler.go`, add an entry to the `alertConfigMaps` map:
-
-```go
-var alertConfigMaps = map[string]string{
-    "TelcoHealthCheckHostNetwork":     "telco-anomaly-host-network-config",
-    "TelcoHealthCheckPodNetwork":      "telco-anomaly-pod-network-config",
-    "TelcoHealthCheckHostReservedCPU": "telco-anomaly-host-reserved-cpu-config",
-    "TelcoHealthCheckMyNewAlert":      "telco-anomaly-my-new-alert-config",  // add this
-}
-```
-
-The alert receiver validates `labels.alertname` against the `thanos-ruler-custom-rules` ConfigMap at runtime, so the alert name here must match the `alert:` value from Step 2 exactly (case-sensitive).
-
-When an alert arrives and its name is found in `alertConfigMaps`, the receiver loads the named ConfigMap to build the AgenticRun. If the name is absent, the alert is skipped with a warning log.
-
----
-
-## Step 5 — Create the AgenticRun config ConfigMap
-
-Add a new ConfigMap entry to `config/manager/agenticrun-configs.yaml`:
+Create `internal/controller/assets/alert-<name>.yaml` with all seven data fields:
 
 ```yaml
----
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: telco-anomaly-my-new-alert-config
-  namespace: telco-healthcheck-system
+  name: telco-anomaly-<name>-config
   labels:
     app.kubernetes.io/managed-by: telco-anomaly-detection
+    ran.openshift.io/system-managed-alert: "true"
 data:
+  alertName: TelcoHealthCheck<Name>
+  alertGroupName: telco-<name>
+  alertRule: |
+    - alert: TelcoHealthCheck<Name>
+      expr: <prometheus_expression>
+      for: 1m
+      labels:
+        severity: warning
+      annotations:
+        cluster: '{{ $labels.cluster }}'
+  alertMetrics: '["metric_one_total","metric_two_total"]'
   request: |
-    You are an experienced OpenShift administrator. Alert TelcoHealthCheckMyNewAlert
+    You are an experienced OpenShift administrator. Alert TelcoHealthCheck<Name>
     has been raised for this cluster. <investigation instructions for Lightspeed>
   skills: "[]"
   mcpServers: "[]"
 ```
 
-**ConfigMap data keys:**
+**Data field notes:**
 
-| Key | Format | Effect when absent or empty |
+| Key | Format | Notes |
 |---|---|---|
-| `request` | Plain string | AgenticRun is skipped (error logged) |
-| `skills` | JSON array of `{image, paths[]}` | `spec.tools.skills` omitted |
-| `mcpServers` | JSON array of `{name, url, timeoutSeconds?}` | `spec.tools.mcpServers` omitted |
+| `alertName` | String | Must match the `alert:` value in `alertRule`; used by the alert receiver to locate this CM |
+| `alertGroupName` | String | Prometheus rule group name; must be unique across all system alerts |
+| `alertRule` | YAML block scalar | The `- alert: ...` block (without the `groups:` wrapper) |
+| `alertMetrics` | JSON array string | Metrics to add to the MCO allowlist; `"[]"` if none needed |
+| `request` | String | Lightspeed prompt; supports `${CLUSTER_NAME}`, `${NODE_NAME}`, `${KUBE_COMPARE_MCP_URL}` |
+| `skills` | JSON array string | OCI skills image config; `"[]"` if none |
+| `mcpServers` | JSON array string | MCP server config; `"[]"` if none |
 
-The `request` field supports `${VAR}` placeholders. Standard variables resolved at AgenticRun creation time:
+### Step 2 — Wire the asset in `systemalerts.go`
 
-| Variable | Value |
-|---|---|
-| `${OPERATOR_NAMESPACE}` | `telco-healthcheck-system` |
-| `${CLUSTER_NAME}` | The target spoke cluster name |
-| `${KUBE_COMPARE_MCP_URL}` | URL of the kube-compare-mcp Route (when RDS compliance is enabled) |
+In `internal/controller/systemalerts.go`:
 
-The controller creates this ConfigMap on first deployment (`ensureAgenticRunConfigs`) and **never overwrites** it after that, so operators can edit the ConfigMap in-cluster without losing changes on the next reconcile.
+1. Add an embed variable:
+   ```go
+   //go:embed assets/alert-<name>.yaml
+   var alert<Name>YAML []byte
+   ```
 
----
+2. Add an entry to `systemAlertAssets`:
+   ```go
+   {yaml: alert<Name>YAML, enabled: func(a ranv1alpha1.AlertsSpec) bool { return a.<Name> }},
+   ```
 
-## Step 6 — Update the sample CR and architecture doc
+### Step 3 — Add a spec field to the API type
+
+In `api/v1alpha1/telcohealthcheck_types.go`, add a boolean to `AlertsSpec`:
+
+```go
+type AlertsSpec struct {
+    HostNetwork     bool `json:"hostNetwork"`
+    // … existing fields …
+    MyNewAlert      bool `json:"myNewAlert"`
+}
+```
+
+Then regenerate generated code:
+
+```bash
+make generate   # regenerates zz_generated.deepcopy.go
+make manifests  # regenerates config/crd/bases/ and config/rbac/
+```
+
+### Step 4 — Update the sample CR and architecture doc
 
 - Add `myNewAlert: false` to the `alerts` block in `config/samples/ran_v1alpha1_telcohealthcheck.yaml`.
-- Add a row for the new alert to the tables in `docs/architecture.md` (Thanos Alert Rules, MCO Custom Metrics Allowlist, and the AgenticRun ConfigMap table).
+- Update `docs/architecture.md`: add a row for the new alert in the system alert tables.
 
----
+### What you do NOT need to change
 
-## Checklist summary
+After this migration, adding a system alert requires **no changes** to:
+- `alertrules.go` or `observabilitymetrics.go` (fully generic)
+- `handler.go` (label-based lookup)
+- `agenticrun-configs.yaml` (the asset file is the config)
+
+### Checklist — system alert
 
 | # | File | What to change |
 |---|---|---|
-| 1 | `api/v1alpha1/telcohealthcheck_types.go` | Add `bool` field to `AlertsSpec` |
-| 1 | Run `make generate && make manifests` | Regenerate DeepCopy and CRD |
-| 2 | `internal/controller/alertrules.go` | Add rule-group function; add branch in `buildCustomRulesYAML` |
-| 3 | `internal/controller/observabilitymetrics.go` | Add metrics to `buildMetricsListYAML` (if raw metrics needed) |
-| 4 | `internal/alertreceiver/handler.go` | Add alert name → ConfigMap entry in `alertConfigMaps` |
-| 5 | `config/manager/agenticrun-configs.yaml` | Add the new ConfigMap |
-| 6 | `config/samples/ran_v1alpha1_telcohealthcheck.yaml` | Add the new field to the sample CR |
-| 6 | `docs/architecture.md` | Update alert rules, metrics, and ConfigMap tables |
+| 1 | `internal/controller/assets/alert-<name>.yaml` | New asset file |
+| 2 | `internal/controller/systemalerts.go` | Add embed var + asset entry |
+| 3 | `api/v1alpha1/telcohealthcheck_types.go` | Add `bool` field to `AlertsSpec` |
+| 3 | Run `make generate && make manifests` | Regenerate DeepCopy and CRD |
+| 4 | `config/samples/ran_v1alpha1_telcohealthcheck.yaml` | Add field to sample CR |
+| 4 | `docs/architecture.md` | Update alert tables |
 
 ---
 
-## Validation
+## Workflow 2: Adding a user-defined alert (operator administrator — no code change, no release)
 
-After deploying the changes:
+User-defined alerts are defined at runtime via a labeled ConfigMap in the operator namespace (`telco-healthcheck-system`). No operator restart is needed; the next reconcile picks them up automatically.
 
-1. Set `spec.alerts.myNewAlert: true` in a `TelcoHealthcheck` CR and confirm that:
-   - The `thanos-ruler-custom-rules` ConfigMap in `open-cluster-management-observability` contains the new rule group.
-   - The `observability-metrics-custom-allowlist` ConfigMap (same namespace) lists any newly required metrics.
-2. Trigger the alert manually using `amtool` or by injecting a test metric above the threshold, and confirm:
-   - The alert receiver logs `matched alert – creating AgenticRun` with the new alert name.
-   - An `AgenticRun` appears in `openshift-lightspeed` on the target spoke cluster.
-3. If the alert receiver logs `no AgenticRun ConfigMap configured for alert, skipping`, Step 4 was missed or the alert name does not match.
-4. If the alert receiver logs `AgenticRun config has empty request field, skipping`, the ConfigMap from Step 5 has an empty `request` key.
+### Required labels
+
+```yaml
+labels:
+  app.kubernetes.io/managed-by: telco-anomaly-detection
+  ran.openshift.io/user-managed-alert: "true"
+```
+
+### Required data fields
+
+```yaml
+data:
+  alertName: MyCustomAlert
+  alertGroupName: telco-user-mycustomalert   # optional; defaults to telco-user-<alertname-lowercased>
+  alertRule: |
+    - alert: MyCustomAlert
+      expr: <prometheus_expression>
+      for: 1m
+      labels:
+        severity: warning
+      annotations:
+        cluster: '{{ $labels.cluster }}'
+  alertMetrics: '["my_custom_metric_total"]'  # JSON array; "[]" if none
+  request: |
+    You are an experienced OpenShift administrator. Alert MyCustomAlert has been raised.
+    <investigation instructions for Lightspeed>
+  skills: "[]"
+  mcpServers: "[]"
+```
+
+The `alertRule` block is the Prometheus alert rule body — the `- alert: ...` item. The controller wraps it in a rule group using `alertGroupName` (or the default) as the group name.
+
+`alertMetrics` is a JSON array of raw metric names that must be forwarded from spoke clusters to the hub via MCO. Omit metrics that are already covered by MCO's built-in recording rules.
+
+`request`, `skills`, and `mcpServers` are read by the alert receiver when building the `AgenticRun`. If `request` is empty, the AgenticRun is skipped with an error log.
+
+### Enable user-defined alerts in the CR
+
+```yaml
+spec:
+  alerts:
+    userAlerts: true
+```
+
+Without `userAlerts: true`, user-alert ConfigMaps are ignored entirely.
+
+### Validation
+
+After creating or updating a user-alert ConfigMap:
+
+1. Wait for the next reconcile (or trigger one by touching the `TelcoHealthcheck` CR).
+2. Confirm the `thanos-ruler-custom-rules` ConfigMap in `open-cluster-management-observability` contains the new rule group.
+3. Confirm the `observability-metrics-custom-allowlist` ConfigMap lists any new metrics.
+4. Fire the alert and verify the alert receiver logs `matched alert – creating AgenticRun`.
+5. Check that an `AgenticRun` appears in `openshift-lightspeed` on the target spoke cluster.
