@@ -27,14 +27,17 @@ resource" intent already stated in the README.
 
 ## Current state (references)
 
-- CR marker: `api/v1alpha1/telcohealthcheck_types.go:105` — `+kubebuilder:resource:scope=Namespaced,shortName=thc`.
+- CR marker: `api/v1alpha1/telcohealthcheck_types.go:108` — `+kubebuilder:resource:scope=Namespaced,shortName=thc`.
 - CRD YAML: `config/crd/bases/ran.openshift.io_telcohealthchecks.yaml:17` — `scope: Namespaced`.
 - Controller multi-CR paths:
-  - log-level sync via `List` + `IsDebugLevel`: `telcohealthcheck_controller.go:80-89`.
-  - enqueue-all on `ManagedCluster` events: `mapManagedClusterToTelcoHealthchecks` at `telcohealthcheck_controller.go:285-304`.
-  - `alertReceiverURL` falls back to `thc.Namespace`: `telcohealthcheck_controller.go:259-269`, called at `:125`.
+  - log-level sync via `List` + `IsDebugLevel`: `telcohealthcheck_controller.go:83-91`.
+  - enqueue-all on `ManagedCluster` events: `mapManagedClusterToTelcoHealthchecks` at `telcohealthcheck_controller.go:312-332`.
+  - `alertReceiverURL` falls back to `thc.Namespace`: `telcohealthcheck_controller.go:281-291`, called at `:135`.
   - `IsDebugLevel` (exported, becomes dead code): `api/v1alpha1/telcohealthcheck_types.go:16-24`.
-- Alert receiver multi-CR path: `getMonitoredClusters` (List + union): `internal/alertreceiver/handler.go:201-234`.
+  - user-alert ConfigMap mapper via `List` + `InNamespace`: `mapUserAlertCMToTHC` at `internal/controller/useralerts.go:95-114`.
+- Alert receiver multi-CR paths:
+  - `getMonitoredClusters` (List + union): `internal/alertreceiver/handler.go:203-236`.
+  - `IsDebugLevel` call on the fetched list: `internal/alertreceiver/handler.go:209-215` — removed with D.1.
 - Stale label: `telco-anomaly.io/owner-namespace` = `thc.Namespace`: `internal/controller/agenticrun.go:80`.
 - RBAC already grants `get;list` on `telcohealthchecks` to the controller SA: `config/rbac/role.yaml:61-70`.
 - Manager Deployment (webhook host): `config/manager/manager.yaml`.
@@ -111,23 +114,30 @@ the webhook runs in the controller binary under the same SA.
 ## Workstream C — Controller single-CR simplification
 
 `internal/controller/telcohealthcheck_controller.go`:
-1. `:80-89` log-level sync — replace the `List` + `IsDebugLevel` with a direct check of
+1. `:83-91` log-level sync — replace the `List` + `IsDebugLevel` with a direct check of
    `thc.Spec.LogLevel`.
-2. `:285-304` `mapManagedClusterToTelcoHealthchecks` — return a single request for the
+2. `:312-332` `mapManagedClusterToTelcoHealthchecks` — return a single request for the
    canonical name instead of listing all CRs.
-3. `:259-269` `alertReceiverURL` — drop the `thc.Namespace` fallback and the now-unused
+3. `:281-291` `alertReceiverURL` — drop the `thc.Namespace` fallback and the now-unused
    `namespace` parameter; keep `OperatorNamespace`/`AlertReceiverSvcURL` as the source.
-   Update the call site at `:125`.
+   Update the call site at `:135`.
 4. `internal/controller/agenticrun.go:80` — remove the `telco-anomaly.io/owner-namespace`
    label (always empty when cluster-scoped); keep `telco-anomaly.io/healthcheck-ref`.
 5. `api/v1alpha1/telcohealthcheck_types.go:16-24` — remove `IsDebugLevel` (dead after C.1).
+6. `internal/controller/useralerts.go:95-114` `mapUserAlertCMToTHC` — replace the
+   `List` + `client.InNamespace(obj.GetNamespace())` filter with a single hardcoded request for
+   `TelcoHealthcheckCanonicalName` (no namespace). When the CRD is cluster-scoped,
+   `obj.GetNamespace()` returns the ConfigMap's namespace, which has no bearing on the CR's key.
+   Update the function comment accordingly.
 
 ## Workstream D — Alert receiver single-CR
 
 `internal/alertreceiver/handler.go`:
-1. `:201-234` `getMonitoredClusters` — replace `List` + union over all CRs with a single
+1. `:203-236` `getMonitoredClusters` — replace `List` + union over all CRs with a single
    `Get` of the canonical CR; derive `monitoredClusters` from its
    `status.monitoredClusters` and the log level from its `spec.logLevel`.
+   Also remove the `IsDebugLevel` call at `:209-215` (which consumed the List result);
+   replace with a direct `thc.Spec.LogLevel == LogLevelDebug` check against the fetched CR.
 
 ## Workstream E — Tests
 
@@ -136,9 +146,13 @@ the webhook runs in the controller binary under the same SA.
    - All CR `types.NamespacedName{Name, Namespace: "default"}` become name-only.
    - `TestMapManagedClusterToTelcoHealthchecks` (`:83-95`) — expect a single request for one
      canonical CR (not two CRs in two namespaces).
+1a. `internal/controller/useralerts_test.go` — add or update a test for `mapUserAlertCMToTHC`
+    to confirm it returns exactly one request whose `NamespacedName.Name` equals
+    `TelcoHealthcheckCanonicalName` and whose `Namespace` is empty, regardless of the
+    ConfigMap's namespace.
 2. `internal/alertreceiver/handler_test.go`
    - `makeTHCWithMonitoredClusters` (`:36-42`) — drop the `namespace` arg; use the canonical name.
-3. `api/v1alpha1/telcohealthcheck_types_test.go:16-17` — drop the now-meaningless
+3. `api/v1alpha1/telcohealthcheck_types_test.go:16` — drop the now-meaningless
    `Namespace: "default"`.
 4. New `internal/webhook/telcohealthcheck_webhook_test.go` (Workstream B.2).
 
@@ -162,6 +176,11 @@ the webhook runs in the controller binary under the same SA.
 6. `AGENTS.md:53` — "Namespace-scoped" → "Cluster-scoped singleton (canonical name
    `telco-healthcheck`)".
 7. `docs/future/cluster-scoped-crd.md` — mark superseded by this document.
+8. `steps.md` — add a new phase entry (Phase 14) for the cluster-scoped singleton migration,
+   listing Workstreams A–F as steps with status "Not started".
+9. `docs/adding-a-new-alert.md`, `docs/adding-a-new-periodic-check.md` — scan for any sample
+   CR YAML that includes a `namespace:` field; remove it and set `name: telco-healthcheck`.
+   (As of the current codebase these guides do not embed full CR YAML, but verify before closing.)
 
 ## Verification
 
