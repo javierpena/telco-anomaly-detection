@@ -1,8 +1,7 @@
 apiVersion: ran.openshift.io/v1alpha1
 kind: TelcoHealthcheck
 metadata:
-  name: telco-healthcheck-sample
-  namespace: telco-healthcheck-system
+  name: telco-healthcheck
 spec:
   # Monitor all ACM ManagedClusters except the hub itself.
   # Use `include` instead to whitelist specific clusters (mutually exclusive with exclude).

@@ -77,7 +77,6 @@ func createAgenticRunsForClusters(
 		labels := map[string]string{
 			"app.kubernetes.io/managed-by":     "telco-anomaly-detection",
 			"telco-anomaly.io/healthcheck-ref": thc.Name,
-			"telco-anomaly.io/owner-namespace": thc.Namespace,
 		}
 		run, err := agenticrun.BuildObject(runName, labels, expanded)
 		if err != nil {

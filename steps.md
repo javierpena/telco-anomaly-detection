@@ -105,6 +105,15 @@
 - [x] Update `docs/adding-a-new-alert.md` (two workflows: system dev and user operator)
 - [x] Update `docs/architecture.md` (reconcile loop, cleanup, Thanos/MCO sections, AgenticRun config table, assets description)
 
+## Phase 14: Cluster-Scoped Singleton Migration ✅
+
+- [x] **A — API & CRD:** Change scope marker to `Cluster` in `api/v1alpha1/telcohealthcheck_types.go`; add `TelcoHealthcheckCanonicalName = "telco-healthcheck"` constant; remove `IsDebugLevel` (dead code); run `make manifests && make generate`
+- [x] **C — Controller simplification:** Replace `List`+`IsDebugLevel` log-level sync with direct `thc.Spec.LogLevel` check; drop `namespace` param from `alertReceiverURL`; simplify `mapManagedClusterToTelcoHealthchecks` to return a single hardcoded request; simplify `mapUserAlertCMToTHC` to return a single hardcoded request; remove `telco-anomaly.io/owner-namespace` label from `agenticrun.go`
+- [x] **D — Alert receiver:** Replace `getMonitoredClusters` List+union with a single `Get` of the canonical CR; replace `IsDebugLevel` call with direct `thc.Spec.LogLevel` check
+- [x] **E — Tests:** Update all test helpers and fixtures to use canonical name and no namespace; rewrite `TestMapManagedClusterToTelcoHealthchecks`; add `TestMapUserAlertCMToTHC_ReturnsSingletonRequest`; add webhook unit tests
+- [x] **B — Validating webhook:** New `internal/webhook/` package with `TelcoHealthcheckValidator` (rejects CREATE with non-canonical name); wire webhook server (port 9443) into `cmd/controller/main.go`; new `config/webhook/` with Service + `ValidatingWebhookConfiguration` (OpenShift service-CA TLS)
+- [x] **F — Manifests & docs:** Add webhook port and cert Secret volume to `config/manager/manager.yaml`; update Makefile deploy/undeploy; update sample CR; update `README.md`, `docs/architecture.md`, `AGENTS.md`; mark `docs/future/cluster-scoped-crd.md` superseded
+
 ## Verification Commands
 
 ```bash

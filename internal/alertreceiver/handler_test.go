@@ -33,9 +33,9 @@ func newHandlerScheme(t *testing.T) *runtime.Scheme {
 	return s
 }
 
-func makeTHCWithMonitoredClusters(name, namespace string, clusters []string) *ranv1alpha1.TelcoHealthcheck {
+func makeTHCWithMonitoredClusters(clusters []string) *ranv1alpha1.TelcoHealthcheck {
 	thc := &ranv1alpha1.TelcoHealthcheck{
-		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
+		ObjectMeta: metav1.ObjectMeta{Name: ranv1alpha1.TelcoHealthcheckCanonicalName},
 	}
 	thc.Status.MonitoredClusters = clusters
 	return thc
@@ -152,7 +152,7 @@ func TestProcessAlerts_MatchCreatesAgenticRun(t *testing.T) {
 
 	const alertName = "TelcoHealthCheckHostNetwork"
 
-	thc := makeTHCWithMonitoredClusters("test", "default", []string{"cluster-a"})
+	thc := makeTHCWithMonitoredClusters([]string{"cluster-a"})
 	kubeSecret := makeKubeconfigSecretUnstructured("cluster-a")
 	alertCM := makeAlertNamesConfigMap([]string{alertName})
 	configCM := makeSystemAlertConfigMap("telco-anomaly-host-network-config", operatorNamespace, alertName, "check host network")
@@ -201,7 +201,7 @@ func TestProcessAlerts_NonFiringAlertSkipped(t *testing.T) {
 
 	const alertName = "TelcoHealthCheckHostNetwork"
 
-	thc := makeTHCWithMonitoredClusters("test", "default", []string{"cluster-a"})
+	thc := makeTHCWithMonitoredClusters([]string{"cluster-a"})
 	kubeSecret := makeKubeconfigSecretUnstructured("cluster-a")
 	alertCM := makeAlertNamesConfigMap([]string{alertName})
 	configCM := makeAgenticRunConfigMapUnstructured("telco-anomaly-host-network-config", operatorNamespace)
@@ -242,7 +242,7 @@ func TestProcessAlerts_NonFiringAlertSkipped(t *testing.T) {
 func TestProcessAlerts_UnmonitoredClusterSkipped(t *testing.T) {
 	scheme := newHandlerScheme(t)
 
-	thc := makeTHCWithMonitoredClusters("test", "default", []string{"cluster-a"})
+	thc := makeTHCWithMonitoredClusters([]string{"cluster-a"})
 	alertCM := makeAlertNamesConfigMap([]string{"TargetAlert"})
 	hubClient := fake.NewClientBuilder().WithScheme(scheme).
 		WithStatusSubresource(thc).
@@ -277,7 +277,7 @@ func TestProcessAlerts_UnmonitoredClusterSkipped(t *testing.T) {
 func TestProcessAlerts_UndefinedAlertSkipped(t *testing.T) {
 	scheme := newHandlerScheme(t)
 
-	thc := makeTHCWithMonitoredClusters("test", "default", []string{"cluster-a"})
+	thc := makeTHCWithMonitoredClusters([]string{"cluster-a"})
 	kubeSecret := makeKubeconfigSecretUnstructured("cluster-a")
 	alertCM := makeAlertNamesConfigMap([]string{"DefinedAlert"})
 	hubClient := fake.NewClientBuilder().WithScheme(scheme).
@@ -315,7 +315,7 @@ func TestProcessAlerts_NodeNameExpandedInRequest(t *testing.T) {
 
 	const alertName = "TelcoHealthCheckOVSProcessCPU"
 
-	thc := makeTHCWithMonitoredClusters("test", "default", []string{"cluster-a"})
+	thc := makeTHCWithMonitoredClusters([]string{"cluster-a"})
 	kubeSecret := makeKubeconfigSecretUnstructured("cluster-a")
 	alertCM := makeAlertNamesConfigMap([]string{alertName})
 	configCM := makeSystemAlertConfigMap(

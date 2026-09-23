@@ -17,6 +17,8 @@ import (
 
 	ranv1alpha1 "github.com/javierpena/telco-anomaly-detection/api/v1alpha1"
 	"github.com/javierpena/telco-anomaly-detection/internal/controller"
+	"github.com/javierpena/telco-anomaly-detection/internal/webhook"
+	ctrlwebhook "sigs.k8s.io/controller-runtime/pkg/webhook"
 )
 
 var scheme = runtime.NewScheme()
@@ -70,6 +72,7 @@ func main() {
 		HealthProbeBindAddress: probeAddr,
 		LeaderElection:         enableLeaderElection,
 		LeaderElectionID:       "telco-anomaly-detection-leader.ran.openshift.io",
+		WebhookServer:          ctrlwebhook.NewServer(ctrlwebhook.Options{Port: 9443}),
 	})
 	if err != nil {
 		logger.Error(err, "unable to create manager")
@@ -84,6 +87,11 @@ func main() {
 		LogLevel:            &atomicLevel,
 	}).SetupWithManager(mgr); err != nil {
 		logger.Error(err, "unable to create TelcoHealthcheck controller")
+		os.Exit(1)
+	}
+
+	if err := (&webhook.TelcoHealthcheckValidator{}).SetupWebhookWithManager(mgr); err != nil {
+		logger.Error(err, "unable to set up TelcoHealthcheck webhook")
 		os.Exit(1)
 	}
 

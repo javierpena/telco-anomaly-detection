@@ -97,13 +97,18 @@ install-crd:
 install-rbac: install-namespace
 	kubectl apply -f config/rbac/
 
+.PHONY: install-webhook
+install-webhook:
+	kubectl apply -f config/webhook/
+
 .PHONY: deploy
-deploy: install-namespace install-crd install-rbac
+deploy: install-namespace install-crd install-rbac install-webhook
 	kubectl apply -f config/manager/
 
 .PHONY: undeploy
 undeploy:
 	kubectl delete -f config/manager/ --ignore-not-found
+	kubectl delete -f config/webhook/ --ignore-not-found
 	kubectl delete -f config/rbac/ --ignore-not-found
 	kubectl delete -f config/crd/bases/ --ignore-not-found
 	kubectl delete -f config/manager/namespace.yaml --ignore-not-found

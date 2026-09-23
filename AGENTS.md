@@ -50,11 +50,11 @@ make install-tools
 
 ### CRD: `TelcoHealthcheck` (`ran.openshift.io/v1alpha1`, shortName `thc`)
 
-Namespace-scoped. Key spec fields: `managedClusters` (include/exclude, mutually exclusive), `managedNamespaces`, `alerts.{hostNetwork,podNetwork}`, `periodicHealthChecks.{period,rdsCompliance}`. Status tracks `monitoredClusters`, `lastPeriodicRunTime`, `lastRDSComplianceRunTime`.
+Cluster-scoped singleton (canonical name `telco-healthcheck`). Key spec fields: `managedClusters` (include/exclude, mutually exclusive), `managedNamespaces`, `alerts.{hostNetwork,podNetwork}`, `periodicHealthChecks.{period,rdsCompliance}`. Status tracks `monitoredClusters`, `lastPeriodicRunTime`, `lastRDSComplianceRunTime`.
 
 ### Controller (`internal/controller/`)
 
-Reconciles `TelcoHealthcheck` CRs and watches `ManagedCluster` events (re-enqueues all TelcoHealthchecks on cluster change). Each reconcile:
+Reconciles the singleton `TelcoHealthcheck` CR and watches `ManagedCluster` events (re-enqueues the canonical CR on cluster change). Each reconcile:
 1. Resolves monitored clusters via `managedcluster.go` (honors include/exclude against ACM `ManagedCluster` list).
 2. Reconciles the Thanos alert rules ConfigMap (`thanos-ruler-custom-rules` in `open-cluster-management-observability`).
 3. Configures the AlertManager receiver in the `alertmanager-config` Secret (same namespace) to POST to the alert receiver webhook.

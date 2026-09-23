@@ -1,3 +1,5 @@
+> **Superseded by [`telcohealthcheck-singleton.md`](telcohealthcheck-singleton.md).** This document covered only the Namespaced→Cluster scope change. The singleton plan extends it with webhook enforcement, a canonical name, and OpenShift service-CA TLS.
+
 # Future: Make TelcoHealthCheck Cluster-Scoped
 
 ## Motivation

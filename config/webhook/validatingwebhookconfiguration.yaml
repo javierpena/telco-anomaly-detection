@@ -1,0 +1,23 @@
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingWebhookConfiguration
+metadata:
+  name: telco-anomaly-validating-webhook
+  annotations:
+    service.beta.openshift.io/inject-cabundle: "true"
+webhooks:
+  - name: vtelcohealthcheck.ran.openshift.io
+    admissionReviewVersions: ["v1"]
+    clientConfig:
+      service:
+        name: telco-anomaly-webhook
+        namespace: telco-healthcheck-system
+        path: /validate-ran-openshift-io-v1alpha1-telcohealthcheck
+        port: 443
+    rules:
+      - apiGroups: ["ran.openshift.io"]
+        apiVersions: ["v1alpha1"]
+        resources: ["telcohealthchecks"]
+        operations: ["CREATE"]
+        scope: "*"
+    sideEffects: None
+    failurePolicy: Fail

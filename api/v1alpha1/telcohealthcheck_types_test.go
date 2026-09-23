@@ -13,8 +13,7 @@ func TestTelcoHealthcheckDeepCopy(t *testing.T) {
 
 	original := &TelcoHealthcheck{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test",
-			Namespace: "default",
+			Name: "test",
 		},
 		Spec: TelcoHealthcheckSpec{
 			ManagedClusters: ManagedClustersSpec{

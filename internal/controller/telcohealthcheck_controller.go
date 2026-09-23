@@ -10,6 +10,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	clusterv1 "open-cluster-management.io/api/cluster/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
@@ -78,17 +79,13 @@ func (r *TelcoHealthcheckReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		return ctrl.Result{}, nil
 	}
 
-	// Sync log level from all TelcoHealthcheck CRs — most verbose wins.
-	// The informer cache makes r.List a local map lookup.
+	// Sync log level from the singleton CR.
 	if r.LogLevel != nil {
-		allThc := &ranv1alpha1.TelcoHealthcheckList{}
-		if listErr := r.List(ctx, allThc); listErr == nil {
-			level := zapcore.InfoLevel
-			if ranv1alpha1.IsDebugLevel(allThc.Items) {
-				level = zapcore.DebugLevel
-			}
-			r.LogLevel.SetLevel(level)
+		level := zapcore.InfoLevel
+		if thc.Spec.LogLevel == ranv1alpha1.LogLevelDebug {
+			level = zapcore.DebugLevel
 		}
+		r.LogLevel.SetLevel(level)
 	}
 
 	// Reconcile system-alert ConfigMaps from embedded assets (create/update when enabled, delete when disabled).
@@ -132,7 +129,7 @@ func (r *TelcoHealthcheckReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	}
 
 	// Reconcile AlertManager webhook receiver.
-	alertReceiverURL := r.alertReceiverURL(thc.Namespace)
+	alertReceiverURL := r.alertReceiverURL()
 	if err := reconcileAlertManagerReceiver(ctx, r.Client, alertReceiverURL); err != nil {
 		logger.Error(err, "failed to reconcile AlertManager receiver")
 		// Non-fatal: log and continue.
@@ -278,16 +275,13 @@ func shouldRunCheck(lastRun *metav1.Time, period time.Duration) bool {
 }
 
 // alertReceiverURL returns the in-cluster service URL for the alert receiver.
-func (r *TelcoHealthcheckReconciler) alertReceiverURL(namespace string) string {
+func (r *TelcoHealthcheckReconciler) alertReceiverURL() string {
 	if r.AlertReceiverSvcURL != "" {
 		return r.AlertReceiverSvcURL
 	}
-	ns := r.OperatorNamespace
-	if ns == "" {
-		ns = namespace
-	}
 	return fmt.Sprintf(
-		"http://telco-anomaly-alert-receiver.%s.svc.cluster.local:8080/webhook", ns)
+		"http://telco-anomaly-alert-receiver.%s.svc.cluster.local:8080/webhook",
+		r.OperatorNamespace)
 }
 
 // SetupWithManager registers the controller with the manager and sets up watches on
@@ -307,26 +301,13 @@ func (r *TelcoHealthcheckReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Complete(r)
 }
 
-// mapManagedClusterToTelcoHealthchecks maps a ManagedCluster event to all TelcoHealthcheck
-// resources so they are re-reconciled when cluster membership changes.
+// mapManagedClusterToTelcoHealthchecks maps a ManagedCluster event to the singleton
+// TelcoHealthcheck CR so it is re-reconciled when cluster membership changes.
 func (r *TelcoHealthcheckReconciler) mapManagedClusterToTelcoHealthchecks(
-	ctx context.Context,
+	_ context.Context,
 	_ client.Object,
 ) []ctrl.Request {
-	logger := log.FromContext(ctx)
-
-	list := &ranv1alpha1.TelcoHealthcheckList{}
-	if err := r.List(ctx, list); err != nil {
-		logger.Error(err, "failed to list TelcoHealthchecks on ManagedCluster event")
-		return nil
-	}
-
-	requests := make([]ctrl.Request, len(list.Items))
-	for i, thc := range list.Items {
-		requests[i] = ctrl.Request{
-			NamespacedName: client.ObjectKeyFromObject(&thc),
-		}
-	}
-	logger.V(1).Info("mapped ManagedCluster event to TelcoHealthcheck reconcile requests", "count", len(requests))
-	return requests
+	return []ctrl.Request{{
+		NamespacedName: types.NamespacedName{Name: ranv1alpha1.TelcoHealthcheckCanonicalName},
+	}}
 }

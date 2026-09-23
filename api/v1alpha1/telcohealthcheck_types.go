@@ -11,17 +11,10 @@ type LogLevel string
 const (
 	LogLevelInfo  LogLevel = "info"
 	LogLevelDebug LogLevel = "debug"
-)
 
-// IsDebugLevel returns true if any CR in items requests debug logging.
-func IsDebugLevel(items []TelcoHealthcheck) bool {
-	for _, thc := range items {
-		if thc.Spec.LogLevel == LogLevelDebug {
-			return true
-		}
-	}
-	return false
-}
+	// TelcoHealthcheckCanonicalName is the required name of the singleton CR.
+	TelcoHealthcheckCanonicalName = "telco-healthcheck"
+)
 
 // ManagedClustersSpec selects which ManagedCluster resources to monitor.
 // Exactly one of Include or Exclude may be specified.
@@ -105,7 +98,7 @@ type TelcoHealthcheckStatus struct {
 
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
-// +kubebuilder:resource:scope=Namespaced,shortName=thc
+// +kubebuilder:resource:scope=Cluster,shortName=thc
 // +kubebuilder:printcolumn:name="Clusters",type=integer,JSONPath=`.status.monitoredClusters`
 // +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
 // TelcoHealthcheck monitors telco workload health across ACM managed clusters.

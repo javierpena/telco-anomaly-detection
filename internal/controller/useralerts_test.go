@@ -7,6 +7,8 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+
+	ranv1alpha1 "github.com/javierpena/telco-anomaly-detection/api/v1alpha1"
 )
 
 const testNamespace = "telco-healthcheck-system"
@@ -140,5 +142,29 @@ func TestListUserAlertConfigs_EmptyMetricsParsed(t *testing.T) {
 	}
 	if len(configs[0].AlertMetrics) != 0 {
 		t.Errorf("expected no metrics, got %v", configs[0].AlertMetrics)
+	}
+}
+
+func TestMapUserAlertCMToTHC_ReturnsSingletonRequest(t *testing.T) {
+	scheme := newTestScheme(t)
+	thc := &ranv1alpha1.TelcoHealthcheck{}
+	thc.Name = ranv1alpha1.TelcoHealthcheckCanonicalName
+	cm := makeUserAlertCM("some-alert", "some-other-namespace", map[string]string{
+		"alertName": "SomeAlert",
+		"alertRule": "- alert: SomeAlert\n  expr: up == 0",
+	})
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(thc, cm).Build()
+
+	r := &TelcoHealthcheckReconciler{Client: c}
+	requests := r.mapUserAlertCMToTHC(context.Background(), cm)
+
+	if len(requests) != 1 {
+		t.Fatalf("expected 1 request, got %d", len(requests))
+	}
+	if requests[0].Name != ranv1alpha1.TelcoHealthcheckCanonicalName {
+		t.Errorf("expected canonical name %q, got %q", ranv1alpha1.TelcoHealthcheckCanonicalName, requests[0].Name)
+	}
+	if requests[0].Namespace != "" {
+		t.Errorf("expected empty namespace for cluster-scoped CR, got %q", requests[0].Namespace)
 	}
 }

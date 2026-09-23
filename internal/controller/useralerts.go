@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -90,25 +91,13 @@ func isUserAlertConfigMap(obj client.Object) bool {
 		labels[userAlertLabel] == userAlertLabelValue
 }
 
-// mapUserAlertCMToTHC maps a user-alert ConfigMap event to all TelcoHealthcheck CRs in
-// the same namespace, so they are re-reconciled whenever a user-alert ConfigMap changes.
+// mapUserAlertCMToTHC maps a user-alert ConfigMap event to the singleton TelcoHealthcheck CR
+// so it is re-reconciled whenever a user-alert ConfigMap changes.
 func (r *TelcoHealthcheckReconciler) mapUserAlertCMToTHC(
-	ctx context.Context,
-	obj client.Object,
+	_ context.Context,
+	_ client.Object,
 ) []ctrl.Request {
-	logger := log.FromContext(ctx)
-
-	list := &ranv1alpha1.TelcoHealthcheckList{}
-	if err := r.List(ctx, list, client.InNamespace(obj.GetNamespace())); err != nil {
-		logger.Error(err, "failed to list TelcoHealthchecks on user-alert ConfigMap event")
-		return nil
-	}
-
-	requests := make([]ctrl.Request, len(list.Items))
-	for i, thc := range list.Items {
-		requests[i] = ctrl.Request{NamespacedName: client.ObjectKeyFromObject(&thc)}
-	}
-	logger.V(1).Info("mapped user-alert ConfigMap event to TelcoHealthcheck reconcile requests",
-		"count", len(requests))
-	return requests
+	return []ctrl.Request{{
+		NamespacedName: types.NamespacedName{Name: ranv1alpha1.TelcoHealthcheckCanonicalName},
+	}}
 }

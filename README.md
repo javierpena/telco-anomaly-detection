@@ -47,8 +47,7 @@ The operator is configured via a single `TelcoHealthcheck` custom resource (`ran
 apiVersion: ran.openshift.io/v1alpha1
 kind: TelcoHealthcheck
 metadata:
-  name: telco-healthcheck-sample
-  namespace: telco-healthcheck-system
+  name: telco-healthcheck  # cluster-scoped singleton; must use this exact name
 spec:
   # Monitor all clusters except the hub.
   # Use `include` to whitelist specific clusters instead (mutually exclusive).

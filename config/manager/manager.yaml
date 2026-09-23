@@ -35,6 +35,9 @@ spec:
             - name: health
               containerPort: 8081
               protocol: TCP
+            - name: webhook
+              containerPort: 9443
+              protocol: TCP
           livenessProbe:
             httpGet:
               path: /healthz
@@ -58,4 +61,12 @@ spec:
             requests:
               cpu: 100m
               memory: 64Mi
+          volumeMounts:
+            - name: webhook-cert
+              mountPath: /tmp/k8s-webhook-server/serving-certs
+              readOnly: true
+      volumes:
+        - name: webhook-cert
+          secret:
+            secretName: telco-anomaly-webhook-cert
       terminationGracePeriodSeconds: 10

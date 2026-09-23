@@ -16,11 +16,10 @@ import (
 	ranv1alpha1 "github.com/javierpena/telco-anomaly-detection/api/v1alpha1"
 )
 
-func makeTelcoHealthcheck(name, namespace string) *ranv1alpha1.TelcoHealthcheck {
+func makeTelcoHealthcheck() *ranv1alpha1.TelcoHealthcheck {
 	return &ranv1alpha1.TelcoHealthcheck{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      name,
-			Namespace: namespace,
+			Name: ranv1alpha1.TelcoHealthcheckCanonicalName,
 		},
 		Spec: ranv1alpha1.TelcoHealthcheckSpec{
 			ManagedClusters: ranv1alpha1.ManagedClustersSpec{
@@ -63,7 +62,7 @@ func TestAlertReceiverURL_Default(t *testing.T) {
 	r := &TelcoHealthcheckReconciler{
 		OperatorNamespace: "telco-healthcheck-system",
 	}
-	url := r.alertReceiverURL("other-ns")
+	url := r.alertReceiverURL()
 	expected := "http://telco-anomaly-alert-receiver.telco-healthcheck-system.svc.cluster.local:8080/webhook"
 	if url != expected {
 		t.Errorf("expected %q, got %q", expected, url)
@@ -74,23 +73,24 @@ func TestAlertReceiverURL_Override(t *testing.T) {
 	r := &TelcoHealthcheckReconciler{
 		AlertReceiverSvcURL: "http://custom-url.example.com/webhook",
 	}
-	url := r.alertReceiverURL("any-ns")
+	url := r.alertReceiverURL()
 	if url != "http://custom-url.example.com/webhook" {
 		t.Errorf("expected override URL, got %q", url)
 	}
 }
 
 func TestMapManagedClusterToTelcoHealthchecks(t *testing.T) {
-	scheme := newTestScheme(t)
-	thc1 := makeTelcoHealthcheck("thc-1", "ns-1")
-	thc2 := makeTelcoHealthcheck("thc-2", "ns-2")
-	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(thc1, thc2).Build()
-
-	r := &TelcoHealthcheckReconciler{Client: c}
+	r := &TelcoHealthcheckReconciler{}
 	requests := r.mapManagedClusterToTelcoHealthchecks(context.Background(), &clusterv1.ManagedCluster{})
 
-	if len(requests) != 2 {
-		t.Errorf("expected 2 reconcile requests, got %d", len(requests))
+	if len(requests) != 1 {
+		t.Errorf("expected 1 reconcile request, got %d", len(requests))
+	}
+	if requests[0].Name != ranv1alpha1.TelcoHealthcheckCanonicalName {
+		t.Errorf("expected canonical name %q, got %q", ranv1alpha1.TelcoHealthcheckCanonicalName, requests[0].Name)
+	}
+	if requests[0].Namespace != "" {
+		t.Errorf("expected empty namespace for cluster-scoped CR, got %q", requests[0].Namespace)
 	}
 }
 
@@ -105,7 +105,7 @@ func TestReconcile_NotFound(t *testing.T) {
 	}
 
 	result, err := r.Reconcile(context.Background(), ctrl.Request{
-		NamespacedName: types.NamespacedName{Name: "nonexistent", Namespace: "default"},
+		NamespacedName: types.NamespacedName{Name: "nonexistent"},
 	})
 	if err != nil {
 		t.Errorf("expected nil error for not-found object, got: %v", err)
@@ -118,7 +118,7 @@ func TestReconcile_NotFound(t *testing.T) {
 func TestReconcile_UpdatesMonitoredClusters(t *testing.T) {
 	scheme := newTestScheme(t)
 
-	thc := makeTelcoHealthcheck("test-thc", "default")
+	thc := makeTelcoHealthcheck()
 	cluster := makeManagedCluster("cluster-a")
 	kubeconfigSecret := makeKubeconfigSecret("cluster-a")
 	alertManagerSecret := makeAlertManagerSecret(baseAlertmanagerYAML)
@@ -141,7 +141,7 @@ func TestReconcile_UpdatesMonitoredClusters(t *testing.T) {
 		OperatorNamespace: "telco-healthcheck-system",
 	}
 
-	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: "test-thc", Namespace: "default"}}
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: ranv1alpha1.TelcoHealthcheckCanonicalName}}
 	// First reconcile adds the finalizer and returns early.
 	if _, err := r.Reconcile(context.Background(), req); err != nil {
 		t.Fatalf("unexpected reconcile error (first pass): %v", err)
@@ -153,7 +153,7 @@ func TestReconcile_UpdatesMonitoredClusters(t *testing.T) {
 
 	// Verify status was updated with monitored clusters
 	updated := &ranv1alpha1.TelcoHealthcheck{}
-	if err := c.Get(context.Background(), types.NamespacedName{Name: "test-thc", Namespace: "default"}, updated); err != nil {
+	if err := c.Get(context.Background(), types.NamespacedName{Name: ranv1alpha1.TelcoHealthcheckCanonicalName}, updated); err != nil {
 		t.Fatalf("failed to get updated TelcoHealthcheck: %v", err)
 	}
 	if len(updated.Status.MonitoredClusters) != 1 || updated.Status.MonitoredClusters[0] != "cluster-a" {
@@ -163,7 +163,7 @@ func TestReconcile_UpdatesMonitoredClusters(t *testing.T) {
 
 func TestReconcile_AddsFinalizer(t *testing.T) {
 	scheme := newTestScheme(t)
-	thc := makeTelcoHealthcheck("test-thc", "default")
+	thc := makeTelcoHealthcheck()
 	alertManagerSecret := makeAlertManagerSecret(baseAlertmanagerYAML)
 	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(thc, alertManagerSecret).WithStatusSubresource(thc).Build()
 
@@ -174,13 +174,13 @@ func TestReconcile_AddsFinalizer(t *testing.T) {
 	}
 
 	if _, err := r.Reconcile(context.Background(), ctrl.Request{
-		NamespacedName: types.NamespacedName{Name: "test-thc", Namespace: "default"},
+		NamespacedName: types.NamespacedName{Name: ranv1alpha1.TelcoHealthcheckCanonicalName},
 	}); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
 	updated := &ranv1alpha1.TelcoHealthcheck{}
-	if err := c.Get(context.Background(), types.NamespacedName{Name: "test-thc", Namespace: "default"}, updated); err != nil {
+	if err := c.Get(context.Background(), types.NamespacedName{Name: ranv1alpha1.TelcoHealthcheckCanonicalName}, updated); err != nil {
 		t.Fatalf("failed to get TelcoHealthcheck: %v", err)
 	}
 	found := false
@@ -198,7 +198,7 @@ func TestReconcile_AddsFinalizer(t *testing.T) {
 func TestReconcile_Deletion_CleansUpAndRemovesFinalizer(t *testing.T) {
 	scheme := newTestScheme(t)
 	now := metav1.Now()
-	thc := makeTelcoHealthcheck("test-thc", "default")
+	thc := makeTelcoHealthcheck()
 	thc.Finalizers = []string{telcoHealthcheckFinalizer}
 	thc.DeletionTimestamp = &now
 
@@ -219,7 +219,7 @@ func TestReconcile_Deletion_CleansUpAndRemovesFinalizer(t *testing.T) {
 	}
 
 	if _, err := r.Reconcile(context.Background(), ctrl.Request{
-		NamespacedName: types.NamespacedName{Name: "test-thc", Namespace: "default"},
+		NamespacedName: types.NamespacedName{Name: ranv1alpha1.TelcoHealthcheckCanonicalName},
 	}); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -227,7 +227,7 @@ func TestReconcile_Deletion_CleansUpAndRemovesFinalizer(t *testing.T) {
 	// After removing the last finalizer, the fake client deletes the object (same as real server).
 	// Verify either the object is gone or the finalizer was cleared.
 	updated := &ranv1alpha1.TelcoHealthcheck{}
-	getErr := c.Get(context.Background(), types.NamespacedName{Name: "test-thc", Namespace: "default"}, updated)
+	getErr := c.Get(context.Background(), types.NamespacedName{Name: ranv1alpha1.TelcoHealthcheckCanonicalName}, updated)
 	if getErr == nil {
 		for _, f := range updated.Finalizers {
 			if f == telcoHealthcheckFinalizer {
@@ -250,7 +250,7 @@ func TestReconcile_Deletion_CleansUpAndRemovesFinalizer(t *testing.T) {
 func TestReconcile_Deletion_NoResourcesStillRemovesFinalizer(t *testing.T) {
 	scheme := newTestScheme(t)
 	now := metav1.Now()
-	thc := makeTelcoHealthcheck("test-thc", "default")
+	thc := makeTelcoHealthcheck()
 	thc.Finalizers = []string{telcoHealthcheckFinalizer}
 	thc.DeletionTimestamp = &now
 
@@ -264,7 +264,7 @@ func TestReconcile_Deletion_NoResourcesStillRemovesFinalizer(t *testing.T) {
 	}
 
 	if _, err := r.Reconcile(context.Background(), ctrl.Request{
-		NamespacedName: types.NamespacedName{Name: "test-thc", Namespace: "default"},
+		NamespacedName: types.NamespacedName{Name: ranv1alpha1.TelcoHealthcheckCanonicalName},
 	}); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -272,7 +272,7 @@ func TestReconcile_Deletion_NoResourcesStillRemovesFinalizer(t *testing.T) {
 	// After removing the last finalizer, the fake client deletes the object (same as real server).
 	// Verify either the object is gone or the finalizer was cleared.
 	updated := &ranv1alpha1.TelcoHealthcheck{}
-	getErr := c.Get(context.Background(), types.NamespacedName{Name: "test-thc", Namespace: "default"}, updated)
+	getErr := c.Get(context.Background(), types.NamespacedName{Name: ranv1alpha1.TelcoHealthcheckCanonicalName}, updated)
 	if getErr == nil {
 		for _, f := range updated.Finalizers {
 			if f == telcoHealthcheckFinalizer {

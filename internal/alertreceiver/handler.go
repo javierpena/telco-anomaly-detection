@@ -198,28 +198,27 @@ func (h *Handler) processAlerts(ctx context.Context, alerts []Alert) error {
 	return nil
 }
 
-// getMonitoredClusters reads all TelcoHealthcheck CRs and builds the union of monitored
+// getMonitoredClusters reads the singleton TelcoHealthcheck CR and returns the set of monitored
 // cluster names along with their kubeconfig bytes.
 func (h *Handler) getMonitoredClusters(ctx context.Context) (map[string]bool, map[string][]byte, error) {
-	thcList := &ranv1alpha1.TelcoHealthcheckList{}
-	if err := h.HubClient.List(ctx, thcList); err != nil {
-		return nil, nil, fmt.Errorf("listing TelcoHealthchecks: %w", err)
+	thc := &ranv1alpha1.TelcoHealthcheck{}
+	if err := h.HubClient.Get(ctx, client.ObjectKey{
+		Name: ranv1alpha1.TelcoHealthcheckCanonicalName,
+	}, thc); err != nil {
+		return nil, nil, fmt.Errorf("getting TelcoHealthcheck: %w", err)
 	}
 
-	// Sync log level from CRs — reuses the already-fetched list, no extra API call.
 	if h.LogLevel != nil {
 		level := zapcore.InfoLevel
-		if ranv1alpha1.IsDebugLevel(thcList.Items) {
+		if thc.Spec.LogLevel == ranv1alpha1.LogLevelDebug {
 			level = zapcore.DebugLevel
 		}
 		h.LogLevel.SetLevel(level)
 	}
 
-	clusterSet := make(map[string]bool)
-	for _, thc := range thcList.Items {
-		for _, name := range thc.Status.MonitoredClusters {
-			clusterSet[name] = true
-		}
+	clusterSet := make(map[string]bool, len(thc.Status.MonitoredClusters))
+	for _, name := range thc.Status.MonitoredClusters {
+		clusterSet[name] = true
 	}
 
 	kubeconfigs := make(map[string][]byte, len(clusterSet))

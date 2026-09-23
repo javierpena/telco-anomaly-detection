@@ -144,7 +144,7 @@ The receiver validates `labels.alertname` against the Thanos rules it wrote itse
 ## CRD: TelcoHealthcheck
 
 **Group / Version / Kind:** `ran.openshift.io/v1alpha1 / TelcoHealthcheck`  
-**Scope:** Namespaced  
+**Scope:** Cluster (singleton — canonical name `telco-healthcheck`)  
 **Short name:** `thc`
 
 ### Spec fields
@@ -179,8 +179,7 @@ The receiver validates `labels.alertname` against the Thanos rules it wrote itse
 apiVersion: ran.openshift.io/v1alpha1
 kind: TelcoHealthcheck
 metadata:
-  name: cluster-monitor
-  namespace: telco-healthcheck-system
+  name: telco-healthcheck  # cluster-scoped singleton; must use this exact name
 spec:
   managedClusters:
     exclude:
@@ -221,14 +220,22 @@ Flags:
 - `--operator-namespace` (default `telco-healthcheck-system`) — used to find AgenticRun config ConfigMaps and build the alert receiver service URL
 - `--alert-receiver-url` — override the in-cluster webhook URL
 
+### Validating webhook (singleton enforcement)
+
+The controller binary also runs a validating admission webhook on port `9443`. It is registered at path `/validate-ran-openshift-io-v1alpha1-telcohealthcheck` and rejects any CREATE request whose `metadata.name` is not `telco-healthcheck`.
+
+TLS is provided by the OpenShift service CA operator: the Service `telco-anomaly-webhook` in `telco-healthcheck-system` carries the annotation `service.beta.openshift.io/serving-cert-secret-name: telco-anomaly-webhook-cert`, which causes the service CA to issue and auto-rotate a serving cert stored in the `telco-anomaly-webhook-cert` Secret. The `ValidatingWebhookConfiguration` carries `service.beta.openshift.io/inject-cabundle: "true"` so the CA bundle is injected automatically.
+
+The webhook uses `failurePolicy: Fail`, meaning CR creation is blocked while the controller pod is starting. The Makefile deploy order (`config/webhook/` before `config/manager/`) ensures the webhook Service and the cert Secret exist before the pod starts.
+
 ### Reconcile loop
 
-Triggered by changes to `TelcoHealthcheck` CRs or `ManagedCluster` resources (ManagedCluster events enqueue all TelcoHealthchecks). Steps in order:
+Triggered by changes to the singleton `TelcoHealthcheck` CR or `ManagedCluster` resources (ManagedCluster events enqueue the canonical CR `telco-healthcheck`). Steps in order:
 
 1. **Fetch** the `TelcoHealthcheck` CR; skip if not found.
 2. **Deletion path** — if `DeletionTimestamp` is set, run cleanup then remove the finalizer.
 3. **Finalizer** — ensure `ran.openshift.io/telcohealthcheck-finalizer` is registered; return early if just added (triggers a new reconcile).
-4. **Log level sync** — read all `TelcoHealthcheck` CRs; set the logger's atomic level to `debug` if any CR requests it, `info` otherwise.
+4. **Log level sync** — read `spec.logLevel` from the CR; set the logger's atomic level to `debug` or `info` accordingly.
 5. **Reconcile system-alert ConfigMaps** (`reconcileSystemAlertConfigMaps`) — for each of the four system alerts (`hostNetwork`, `podNetwork`, `hostReservedCPU`, `ovsProcessCPU`), creates or updates the corresponding ConfigMap in the operator namespace from the embedded asset file when the spec boolean is `true`, and deletes it when `false`. Must run before the alert-rule listing step. Returns an error (requeueing) if any create/update/delete fails.
 5a. **Reconcile system-periodic ConfigMaps** (`reconcileSystemPeriodicConfigMaps`) — for each periodic check type (`rdsCompliance`), creates or updates the corresponding ConfigMap in the operator namespace from the embedded asset file when the spec boolean is `true`, and deletes it when `false`. Mirrors the behaviour of step 5 for system-alert ConfigMaps. Returns an error (requeueing) if any create/update/delete fails.
 5b. **Reconcile kube-compare-mcp** (`reconcileKubeCompareMCP`) — when `rdsCompliance.enabled` is true, creates the registry credentials secret and applies the kube-compare-mcp ServiceAccount, ClusterRole, ClusterRoleBinding, Deployment, Service, and Route via server-side apply. When false, removes all of those resources. Returns an error that stops the reconcile if any step fails.
@@ -337,7 +344,6 @@ The Go client library for `AgenticRun` is not yet published, so all objects are 
 | `telco-anomaly.io/trigger-alert` | Alert name (alert path only) |
 | `telco-anomaly.io/trigger-cluster` | Cluster name (alert path only) |
 | `telco-anomaly.io/healthcheck-ref` | TelcoHealthcheck CR name (periodic path) |
-| `telco-anomaly.io/owner-namespace` | TelcoHealthcheck CR namespace (periodic path) |
 
 ### Spec fields populated
 
