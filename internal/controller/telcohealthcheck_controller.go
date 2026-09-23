@@ -33,6 +33,7 @@ const telcoHealthcheckFinalizer = "ran.openshift.io/telcohealthcheck-finalizer"
 // +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=coordination.k8s.io,resources=leases,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
+// +kubebuilder:rbac:groups=admissionregistration.k8s.io,resources=validatingwebhookconfigurations,verbs=get
 
 // TelcoHealthcheckReconciler reconciles TelcoHealthcheck objects.
 // It drives alert rule management, AlertManager webhook configuration, and periodic

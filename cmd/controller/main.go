@@ -2,26 +2,49 @@ package main
 
 import (
 	"flag"
+	"fmt"
+	"net/http"
 	"os"
 
 	uberzap "go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
+	admissionregistrationv1 "k8s.io/api/admissionregistration/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	clusterv1 "open-cluster-management.io/api/cluster/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	ctrlzap "sigs.k8s.io/controller-runtime/pkg/log/zap"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
+	ctrlwebhook "sigs.k8s.io/controller-runtime/pkg/webhook"
 
 	ranv1alpha1 "github.com/javierpena/telco-anomaly-detection/api/v1alpha1"
 	"github.com/javierpena/telco-anomaly-detection/internal/controller"
 	"github.com/javierpena/telco-anomaly-detection/internal/webhook"
-	ctrlwebhook "sigs.k8s.io/controller-runtime/pkg/webhook"
 )
 
 var scheme = runtime.NewScheme()
+
+// webhookCABundleReady returns a healthz.Checker that passes only when the
+// service CA operator has injected a non-empty CA bundle into the
+// ValidatingWebhookConfiguration. Uses the API reader (bypasses cache) so the
+// check is accurate during startup before the cache is synced.
+func webhookCABundleReady(reader client.Reader) healthz.Checker {
+	return func(req *http.Request) error {
+		vwc := &admissionregistrationv1.ValidatingWebhookConfiguration{}
+		if err := reader.Get(req.Context(), client.ObjectKey{
+			Name: "telco-anomaly-validating-webhook",
+		}, vwc); err != nil {
+			return fmt.Errorf("getting ValidatingWebhookConfiguration: %w", err)
+		}
+		if len(vwc.Webhooks) == 0 || len(vwc.Webhooks[0].ClientConfig.CABundle) == 0 {
+			return fmt.Errorf("webhook CA bundle not yet injected by service CA operator")
+		}
+		return nil
+	}
+}
 
 func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
@@ -101,6 +124,13 @@ func main() {
 	}
 	if err := mgr.AddReadyzCheck("readyz", healthz.Ping); err != nil {
 		logger.Error(err, "unable to set up ready check")
+		os.Exit(1)
+	}
+	// Block readiness until the service CA operator has injected the CA bundle into
+	// the ValidatingWebhookConfiguration. Without the bundle, failurePolicy:Fail silently
+	// blocks all TelcoHealthcheck creates.
+	if err := mgr.AddReadyzCheck("webhook-ca-bundle", webhookCABundleReady(mgr.GetAPIReader())); err != nil {
+		logger.Error(err, "unable to set up webhook CA bundle readiness check")
 		os.Exit(1)
 	}
 
