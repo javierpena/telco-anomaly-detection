@@ -120,7 +120,7 @@ make manifests  # regenerates config/crd/bases/ and config/rbac/
 After this migration, adding a system alert requires **no changes** to:
 - `alertrules.go` or `observabilitymetrics.go` (fully generic)
 - `handler.go` (label-based lookup)
-- `agenticrun-configs.yaml` (the asset file is the config)
+- `config/manager/agenticrun-configs.yaml` (no longer exists; the embedded asset file is the config)
 
 ### Checklist — system alert
 

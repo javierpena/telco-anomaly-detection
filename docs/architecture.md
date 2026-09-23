@@ -230,7 +230,7 @@ Triggered by changes to `TelcoHealthcheck` CRs or `ManagedCluster` resources (Ma
 3. **Finalizer** — ensure `ran.openshift.io/telcohealthcheck-finalizer` is registered; return early if just added (triggers a new reconcile).
 4. **Log level sync** — read all `TelcoHealthcheck` CRs; set the logger's atomic level to `debug` if any CR requests it, `info` otherwise.
 5. **Reconcile system-alert ConfigMaps** (`reconcileSystemAlertConfigMaps`) — for each of the four system alerts (`hostNetwork`, `podNetwork`, `hostReservedCPU`, `ovsProcessCPU`), creates or updates the corresponding ConfigMap in the operator namespace from the embedded asset file when the spec boolean is `true`, and deletes it when `false`. Must run before the alert-rule listing step. Returns an error (requeueing) if any create/update/delete fails.
-5a. **Ensure AgenticRun ConfigMaps** (`ensureAgenticRunConfigs`) — create the RDS compliance AgenticRun config ConfigMap in the operator namespace if it does not already exist (create-if-absent, never overwrite). Returns an error (requeueing) if creation fails.
+5a. **Reconcile system-periodic ConfigMaps** (`reconcileSystemPeriodicConfigMaps`) — for each periodic check type (`rdsCompliance`), creates or updates the corresponding ConfigMap in the operator namespace from the embedded asset file when the spec boolean is `true`, and deletes it when `false`. Mirrors the behaviour of step 5 for system-alert ConfigMaps. Returns an error (requeueing) if any create/update/delete fails.
 5b. **Reconcile kube-compare-mcp** (`reconcileKubeCompareMCP`) — when `rdsCompliance.enabled` is true, creates the registry credentials secret and applies the kube-compare-mcp ServiceAccount, ClusterRole, ClusterRoleBinding, Deployment, Service, and Route via server-side apply. When false, removes all of those resources. Returns an error that stops the reconcile if any step fails.
 6. **Resolve monitored clusters** (`getMonitoredClusters`) — list all `ManagedCluster` resources and apply include/exclude rules from the spec. Result stored in `status.monitoredClusters`.
 7. **Reconcile Thanos alert rules** (`reconcileAlertRules`) — lists system-alert ConfigMaps (always) and user-alert ConfigMaps (when `userAlerts` is true) in the operator namespace, builds a unified Prometheus YAML from their `alertRule` fields, and creates or updates `thanos-ruler-custom-rules` in `open-cluster-management-observability`. Group names come from `alertGroupName` (system alerts) or default to `telco-user-<alertname-lowercased>` (user alerts). Non-fatal if this fails.
@@ -370,9 +370,11 @@ Each trigger type reads its AgenticRun parameters from a dedicated ConfigMap in 
 | `TelcoHealthCheckPodNetwork` alert | `telco-anomaly-pod-network-config` | Managed by `reconcileSystemAlertConfigMaps` from embedded asset |
 | `TelcoHealthCheckHostReservedCPU` alert | `telco-anomaly-host-reserved-cpu-config` | Managed by `reconcileSystemAlertConfigMaps` from embedded asset |
 | `TelcoHealthCheckOVSProcessCPU` alert | `telco-anomaly-ovs-process-cpu-config` | Managed by `reconcileSystemAlertConfigMaps` from embedded asset |
-| `rds-compliance` periodic check | `telco-anomaly-rds-compliance-config` | Deployed by `agenticrun-configs.yaml`; `ensureAgenticRunConfigs` create-if-absent |
+| `rds-compliance` periodic check | `telco-anomaly-rds-compliance-config` | Managed by `reconcileSystemPeriodicConfigMaps` from embedded asset |
 
 The four alert-type ConfigMaps carry label `ran.openshift.io/system-managed-alert: "true"`. The controller creates or updates them from the embedded asset YAML on every reconcile (when the corresponding spec boolean is true) and deletes them when disabled.
+
+The periodic-check ConfigMap (`telco-anomaly-rds-compliance-config`) carries label `ran.openshift.io/system-managed-periodic: "true"` and follows the same create-or-update lifecycle, controlled by `spec.periodicHealthChecks.rdsCompliance.enabled`.
 
 **ConfigMap data keys (all ConfigMaps):**
 
@@ -584,15 +586,7 @@ Creates the `telco-healthcheck-system` namespace with Pod Security Standards lab
 - Liveness/readiness: `GET /healthz`
 - Resources: limits 200m CPU / 128Mi RAM; requests 50m CPU / 32Mi RAM
 
-### `config/manager/agenticrun-configs.yaml`
-
-One ConfigMap deployed alongside the operator:
-
-- `telco-anomaly-rds-compliance-config` — real `request` prompt; `mcpServers` wired to `${KUBE_COMPARE_MCP_URL}`; `skills` references the RDS compliance skill image
-
-The four alert-type ConfigMaps (`telco-anomaly-host-network-config`, `telco-anomaly-pod-network-config`, `telco-anomaly-host-reserved-cpu-config`, `telco-anomaly-ovs-process-cpu-config`) are no longer pre-installed here. They are managed at runtime by `reconcileSystemAlertConfigMaps` from the embedded asset files in `internal/controller/assets/`.
-
-Edit `telco-anomaly-rds-compliance-config` to supply real `request`, `skills`, and `mcpServers` values. The controller never overwrites it after initial creation.
+All AgenticRun config ConfigMaps (`telco-anomaly-host-network-config`, `telco-anomaly-pod-network-config`, `telco-anomaly-host-reserved-cpu-config`, `telco-anomaly-ovs-process-cpu-config`, `telco-anomaly-rds-compliance-config`) are managed at runtime from embedded asset files in `internal/controller/assets/`. There is no separate deploy-time YAML for these ConfigMaps. The controller creates or updates each one on every reconcile based on the corresponding spec boolean; content comes from the embedded asset and is always kept in sync with the binary.
 
 ### `config/crd/bases/ran.openshift.io_telcohealthchecks.yaml`
 
@@ -656,7 +650,7 @@ TelcoHealthcheck CR change / ManagedCluster change
         │
         ▼
 Controller reconcile
-  ├── Ensure AgenticRun config ConfigMaps exist (create-if-absent)
+  ├── Reconcile system-periodic ConfigMaps (create/update from embedded asset)
   ├── Resolve monitored clusters (ManagedCluster list + include/exclude)
   ├── Write thanos-ruler-custom-rules ConfigMap
   │       └─► Thanos Ruler reloads rules (config-reload sidecar)

@@ -98,9 +98,9 @@ func (r *TelcoHealthcheckReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		return ctrl.Result{}, err
 	}
 
-	// Ensure AgenticRun configuration ConfigMaps exist (create-if-absent; never overwrite).
-	if err := ensureAgenticRunConfigs(ctx, r.Client, r.OperatorNamespace); err != nil {
-		logger.Error(err, "failed to ensure AgenticRun config ConfigMaps")
+	// Reconcile system-periodic ConfigMaps from embedded assets (create/update when enabled, delete when disabled).
+	if err := reconcileSystemPeriodicConfigMaps(ctx, r.Client, r.OperatorNamespace, thc.Spec.PeriodicHealthChecks); err != nil {
+		logger.Error(err, "failed to reconcile system periodic ConfigMaps")
 		return ctrl.Result{}, err
 	}
 
@@ -208,6 +208,12 @@ func (r *TelcoHealthcheckReconciler) cleanupResources(
 	}
 	if err := cleanupSystemAlertConfigMaps(ctx, r.Client, r.OperatorNamespace); err != nil {
 		logger.Error(err, "failed to cleanup system alert ConfigMaps")
+		if firstErr == nil {
+			firstErr = err
+		}
+	}
+	if err := cleanupSystemPeriodicConfigMaps(ctx, r.Client, r.OperatorNamespace); err != nil {
+		logger.Error(err, "failed to cleanup system periodic ConfigMaps")
 		if firstErr == nil {
 			firstErr = err
 		}
