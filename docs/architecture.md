@@ -222,6 +222,33 @@ Flags:
 - `--operator-namespace` (default `telco-healthcheck-system`) — used to find AgenticRun config ConfigMaps and build the alert receiver service URL
 - `--alert-receiver-url` — override the in-cluster webhook URL
 
+### Prometheus metrics
+
+The controller-runtime metrics server serves `GET /metrics` on
+`--metrics-bind-address` (default `:8080`). The
+`telco-anomaly-controller-metrics` ClusterIP Service in
+`telco-healthcheck-system` selects the controller pod and exposes its named
+`metrics` port (8080/TCP) for in-cluster scraping. Scrape discovery is
+configured separately; no ServiceMonitor is installed by this project.
+
+The controller registers these application gauges alongside the built-in
+controller-runtime metrics:
+
+| Metric | Meaning |
+|---|---|
+| `telco_healthcheck_managed_clusters` | Length of `status.monitoredClusters` on the canonical `TelcoHealthcheck` singleton (zero when absent). |
+| `telco_healthcheck_runs` | Number of hub-side `TelcoHealthCheckRun` records in the configured operator namespace. |
+| `telco_healthcheck_runs_action_required` | Number of those records with `status.agenticRunActionRequired` exactly `"True"`. |
+| `telco_healthcheck_runs_by_phase{phase="..."}` | Number of those records for each current `status.agenticRunStatus.phase`. Missing or empty phases use `"Unknown"`. |
+
+The collector reads the hub API on each scrape, so run deletion, status
+changes, and purges affect the next successful scrape. It emits only phases
+present in the current records, with no per-cluster or per-run labels. A
+missing singleton reports zero managed clusters; other API read failures fail
+the scrape rather than exposing partial or misleading values. Run counts
+include all records in the operator namespace, even for clusters that are no
+longer monitored.
+
 ### Validating webhook (singleton enforcement)
 
 The controller binary also runs a validating admission webhook on port `9443`. It is registered at path `/validate-ran-openshift-io-v1alpha1-telcohealthcheck` and rejects any CREATE request whose `metadata.name` is not `telco-healthcheck`.
@@ -650,6 +677,12 @@ Creates the `telco-healthcheck-system` namespace with Pod Security Standards lab
 - Args: `--leader-elect`, `--health-probe-bind-address=:8081`, `--metrics-bind-address=:8080`
 - Resources: limits 500m CPU / 256Mi RAM; requests 100m CPU / 64Mi RAM
 - Security: `runAsNonRoot`, `RuntimeDefault` seccomp, all capabilities dropped
+
+### `config/manager/metrics-service.yaml`
+
+ClusterIP Service `telco-anomaly-controller-metrics` in
+`telco-healthcheck-system`, selecting controller pods and forwarding port
+8080/TCP to their named `metrics` container port for `GET /metrics`.
 
 ### `config/manager/alertreceiver.yaml`
 

@@ -17,6 +17,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	ctrlzap "sigs.k8s.io/controller-runtime/pkg/log/zap"
+	"sigs.k8s.io/controller-runtime/pkg/metrics"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	ctrlwebhook "sigs.k8s.io/controller-runtime/pkg/webhook"
 
@@ -99,6 +100,10 @@ func main() {
 	})
 	if err != nil {
 		logger.Error(err, "unable to create manager")
+		os.Exit(1)
+	}
+	if err := metrics.Registry.Register(controller.NewMetricsCollector(mgr.GetAPIReader(), operatorNamespace)); err != nil {
+		logger.Error(err, "unable to register health check metrics")
 		os.Exit(1)
 	}
 

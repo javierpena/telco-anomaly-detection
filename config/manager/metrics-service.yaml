@@ -1,0 +1,16 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: telco-anomaly-controller-metrics
+  namespace: telco-healthcheck-system
+  labels:
+    app: telco-anomaly-controller
+spec:
+  type: ClusterIP
+  selector:
+    app: telco-anomaly-controller
+  ports:
+    - name: metrics
+      port: 8080
+      targetPort: metrics
+      protocol: TCP
