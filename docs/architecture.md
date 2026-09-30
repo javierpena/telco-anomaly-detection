@@ -249,8 +249,8 @@ Triggered by changes to the singleton `TelcoHealthcheck` CR or `ManagedCluster` 
 7. **Reconcile Thanos alert rules** (`reconcileAlertRules`) — lists system-alert ConfigMaps (always) and user-alert ConfigMaps (when `userAlerts` is true) in the operator namespace, builds a unified Prometheus YAML from their `alertRule` fields, and creates or updates `thanos-ruler-custom-rules` in `open-cluster-management-observability`. Group names come from `alertGroupName` (system alerts) or default to `telco-user-<alertname-lowercased>` (user alerts). Non-fatal if this fails.
 8. **Reconcile AlertManager receiver** (`reconcileAlertManagerReceiver`) — read the `alertmanager-config` Secret in `open-cluster-management-observability`, upsert a webhook receiver entry pointing to the alert receiver service URL. Non-fatal if this fails.
 8a. **Reconcile MCO custom metrics allowlist** (`reconcileObservabilityMetrics`) — same listing pattern as step 7; deduplicates and writes all metric names from `alertMetrics` fields to `observability-metrics-custom-allowlist` in `open-cluster-management-observability`. Non-fatal if this fails.
-9. **Periodic checks** (`runPeriodicChecks`) — for each enabled sub-check, if its period has elapsed, create AgenticRuns on all monitored spoke clusters. Currently only RDS compliance is implemented. Updates `status.lastRDSComplianceRunTime`.
-10. **Persist status** — write updated status back to the API server.
+9. **Periodic checks** (`runPeriodicChecks`) — for each enabled sub-check, if its period has elapsed, validate its AgenticRun config and persist the due-time claim in status before creating AgenticRuns on monitored spokes. The status update uses the API resource version as an optimistic lock: a queued reconcile holding stale status stops before creating another run. Currently only RDS compliance is implemented; remaining status is persisted at the end of reconciliation.
+10. **Persist status** — write status changes not already included in the periodic schedule claim back to the API server.
 11. **Requeue** — return `ctrl.Result{RequeueAfter: <time-until-next-check>}`.
 
 ### Cleanup (on deletion)

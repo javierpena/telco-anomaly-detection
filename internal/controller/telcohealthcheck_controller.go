@@ -160,9 +160,10 @@ func (r *TelcoHealthcheckReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	}
 
 	// Determine next requeue time based on periodic check schedules.
-	requeueAfter, err := r.runPeriodicChecks(ctx, thc, monitoredClusters)
+	requeueAfter, periodicStatusPersisted, err := r.runPeriodicChecks(ctx, thc, monitoredClusters)
 	if err != nil {
 		logger.Error(err, "error during periodic check scheduling")
+		return ctrl.Result{}, err
 	}
 	if pendingRuns && (requeueAfter == 0 || requeueAfter > time.Minute) {
 		requeueAfter = time.Minute
@@ -173,10 +174,12 @@ func (r *TelcoHealthcheckReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		requeueAfter = 5 * time.Second
 	}
 
-	// Persist status changes.
-	if err := r.Status().Update(ctx, thc); err != nil {
-		logger.Error(err, "failed to update status")
-		return ctrl.Result{}, err
+	// Persist status changes not already written as the periodic schedule claim.
+	if !periodicStatusPersisted {
+		if err := r.Status().Update(ctx, thc); err != nil {
+			logger.Error(err, "failed to update status")
+			return ctrl.Result{}, err
+		}
 	}
 
 	logger.Info("reconciliation complete", "requeueAfter", requeueAfter)
@@ -265,7 +268,7 @@ func (r *TelcoHealthcheckReconciler) runPeriodicChecks(
 	ctx context.Context,
 	thc *ranv1alpha1.TelcoHealthcheck,
 	monitoredClusters []string,
-) (time.Duration, error) {
+) (time.Duration, bool, error) {
 	logger := log.FromContext(ctx)
 	now := metav1.Now()
 	period := thc.Spec.PeriodicHealthChecks.Period.Duration
@@ -273,10 +276,11 @@ func (r *TelcoHealthcheckReconciler) runPeriodicChecks(
 	// Zero period means disabled — skip all sub-checks and don't requeue.
 	if period == 0 {
 		logger.V(1).Info("periodic health checks disabled (period is zero)")
-		return 0, nil
+		return 0, false, nil
 	}
 
 	requeueAfter := period
+	statusPersisted := false
 
 	// RDS compliance check.
 	rds := thc.Spec.PeriodicHealthChecks.RDSCompliance
@@ -288,10 +292,23 @@ func (r *TelcoHealthcheckReconciler) runPeriodicChecks(
 
 		if shouldRunCheck(thc.Status.LastRDSComplianceRunTime, rdsPeriod) {
 			logger.Info("running RDS compliance health checks")
-			if err := createAgenticRunsForClusters(ctx, r.Client, thc, monitoredClusters, "rds-compliance"); err != nil {
-				logger.Error(err, "error during RDS compliance checks")
-			} else {
-				thc.Status.LastRDSComplianceRunTime = &now
+			cfg, err := loadRunConfigForCheck(ctx, r.Client, "rds-compliance")
+			if err != nil {
+				return requeueAfter, false, err
+			}
+
+			// Persist the schedule claim before making the non-transactional spoke
+			// create. A queued reconcile can have a stale cache entry; the status
+			// update's resourceVersion check makes it stop before creating a second
+			// AgenticRun if another reconcile already claimed this interval.
+			thc.Status.LastRDSComplianceRunTime = &now
+			if err := r.Status().Update(ctx, thc); err != nil {
+				return requeueAfter, false, fmt.Errorf("persisting RDS compliance schedule claim: %w", err)
+			}
+			statusPersisted = true
+
+			if err := createAgenticRunsForClustersWithConfig(ctx, r.Client, thc, monitoredClusters, "rds-compliance", cfg); err != nil {
+				return requeueAfter, statusPersisted, fmt.Errorf("creating RDS compliance AgenticRuns: %w", err)
 			}
 		} else if thc.Status.LastRDSComplianceRunTime != nil {
 			untilNext := rdsPeriod - time.Since(thc.Status.LastRDSComplianceRunTime.Time)
@@ -301,7 +318,7 @@ func (r *TelcoHealthcheckReconciler) runPeriodicChecks(
 		}
 	}
 
-	return requeueAfter, nil
+	return requeueAfter, statusPersisted, nil
 }
 
 // shouldRunCheck returns true if lastRun is nil (never run) or the period has elapsed.

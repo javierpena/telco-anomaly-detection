@@ -7,6 +7,9 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	clusterv1 "open-cluster-management.io/api/cluster/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -14,6 +17,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	ranv1alpha1 "github.com/javierpena/telco-anomaly-detection/api/v1alpha1"
+	"github.com/javierpena/telco-anomaly-detection/internal/agenticrun"
 )
 
 func makeTelcoHealthcheck() *ranv1alpha1.TelcoHealthcheck {
@@ -56,6 +60,62 @@ func TestShouldRunCheck(t *testing.T) {
 			t.Error("expected shouldRunCheck to return false when period has not elapsed")
 		}
 	})
+}
+
+func TestRunPeriodicChecks_StaleReconcileCannotCreateDuplicate(t *testing.T) {
+	scheme := newTestScheme(t)
+	thc := makeTelcoHealthcheck()
+	thc.UID = "test-owner-uid"
+	thc.Spec.PeriodicHealthChecks.RDSCompliance.Enabled = true
+
+	spoke := fake.NewClientBuilder().WithScheme(runtime.NewScheme()).Build()
+	originalBuildSpokeClient := buildSpokeClient
+	defer func() { buildSpokeClient = originalBuildSpokeClient }()
+	buildSpokeClient = func([]byte) (client.Client, error) { return spoke, nil }
+
+	hub := fake.NewClientBuilder().WithScheme(scheme).
+		WithStatusSubresource(&ranv1alpha1.TelcoHealthcheck{}, &ranv1alpha1.TelcoHealthCheckRun{}).
+		WithObjects(
+			thc,
+			makeKubeconfigSecret("cluster-a"),
+			makeAgenticRunConfigMap("telco-anomaly-rds-compliance-config", operatorNamespace),
+		).Build()
+
+	// Model two queued reconcile requests that both read status before either
+	// one claims the due interval.
+	first := &ranv1alpha1.TelcoHealthcheck{}
+	stale := &ranv1alpha1.TelcoHealthcheck{}
+	key := types.NamespacedName{Name: ranv1alpha1.TelcoHealthcheckCanonicalName}
+	if err := hub.Get(context.Background(), key, first); err != nil {
+		t.Fatalf("getting first reconcile snapshot: %v", err)
+	}
+	if err := hub.Get(context.Background(), key, stale); err != nil {
+		t.Fatalf("getting stale reconcile snapshot: %v", err)
+	}
+
+	r := &TelcoHealthcheckReconciler{Client: hub}
+	if _, persisted, err := r.runPeriodicChecks(context.Background(), first, []string{"cluster-a"}); err != nil {
+		t.Fatalf("first periodic check failed: %v", err)
+	} else if !persisted {
+		t.Fatal("expected first reconcile to persist its schedule claim")
+	}
+
+	if _, persisted, err := r.runPeriodicChecks(context.Background(), stale, []string{"cluster-a"}); err == nil {
+		t.Fatal("expected stale reconcile to fail its conflicting schedule claim")
+	} else if persisted {
+		t.Fatal("stale reconcile must not report a persisted schedule claim")
+	}
+
+	runs := &unstructured.UnstructuredList{}
+	runs.SetGroupVersionKind(schema.GroupVersionKind{
+		Group: agenticrun.Group, Version: agenticrun.Version, Kind: agenticrun.Kind + "List",
+	})
+	if err := spoke.List(context.Background(), runs); err != nil {
+		t.Fatalf("listing spoke AgenticRuns: %v", err)
+	}
+	if len(runs.Items) != 1 {
+		t.Fatalf("expected exactly one AgenticRun for the interval, got %d", len(runs.Items))
+	}
 }
 
 func TestAlertReceiverURL_Default(t *testing.T) {

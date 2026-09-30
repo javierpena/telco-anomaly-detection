@@ -34,20 +34,38 @@ func createAgenticRunsForClusters(
 	monitoredClusters []string,
 	checkType string,
 ) error {
-	logger := log.FromContext(ctx)
+	cfg, err := loadRunConfigForCheck(ctx, c, checkType)
+	if err != nil {
+		return err
+	}
+	return createAgenticRunsForClustersWithConfig(ctx, c, thc, monitoredClusters, checkType, cfg)
+}
 
+func loadRunConfigForCheck(ctx context.Context, c client.Client, checkType string) (*agenticrun.RunConfig, error) {
 	configMapName, ok := checkTypeConfigMaps[checkType]
 	if !ok {
-		return fmt.Errorf("no AgenticRun ConfigMap configured for check type %q", checkType)
+		return nil, fmt.Errorf("no AgenticRun ConfigMap configured for check type %q", checkType)
 	}
 
 	cfg, err := agenticrun.LoadRunConfig(ctx, c, configMapName, operatorNamespace)
 	if err != nil {
-		return fmt.Errorf("loading AgenticRun config for check type %q: %w", checkType, err)
+		return nil, fmt.Errorf("loading AgenticRun config for check type %q: %w", checkType, err)
 	}
 	if cfg.Request == "" {
-		return fmt.Errorf("AgenticRun config for check type %q has empty request field", checkType)
+		return nil, fmt.Errorf("AgenticRun config for check type %q has empty request field", checkType)
 	}
+	return cfg, nil
+}
+
+func createAgenticRunsForClustersWithConfig(
+	ctx context.Context,
+	c client.Client,
+	thc *ranv1alpha1.TelcoHealthcheck,
+	monitoredClusters []string,
+	checkType string,
+	cfg *agenticrun.RunConfig,
+) error {
+	logger := log.FromContext(ctx)
 
 	logger.Info("creating AgenticRun resources", "checkType", checkType, "clusterCount", len(monitoredClusters))
 
