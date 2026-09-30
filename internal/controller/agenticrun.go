@@ -91,7 +91,12 @@ func createAgenticRunsForClusters(
 			continue
 		}
 		if err := spokeClient.Create(ctx, run); err != nil {
-			logger.Error(err, "failed to create AgenticRun; pending record will be checked", "cluster", clusterName, "name", runName)
+			if healthcheckrun.DefinitiveCreateError(err) {
+				if statusErr := healthcheckrun.Fail(ctx, c, operatorNamespace, recordName); statusErr != nil {
+					logger.Error(statusErr, "failed to record spoke creation failure; pending record will be checked", "cluster", clusterName, "name", runName)
+				}
+			}
+			logger.Error(err, "failed to create AgenticRun", "cluster", clusterName, "name", runName)
 			continue
 		}
 		if err := healthcheckrun.Confirm(ctx, c, operatorNamespace, recordName); err != nil {

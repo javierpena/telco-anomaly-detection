@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"crypto/sha256"
+	"reflect"
 	"sync"
 	"time"
 
@@ -191,8 +192,9 @@ func (m *SpokeWatchManager) handleResult(ctx context.Context, cluster string, re
 		return
 	}
 	observed := extractResultStatus(result)
-	if observed == nil {
-		return
+	actionRequired, _, _ := unstructured.NestedString(result.Object, "status", "actionRequired")
+	if actionRequired != "True" && actionRequired != "False" {
+		actionRequired = ""
 	}
 	var records ranv1alpha1.TelcoHealthCheckRunList
 	if err := m.reader.List(ctx, &records, client.InNamespace(m.namespace),
@@ -210,12 +212,23 @@ func (m *SpokeWatchManager) handleResult(ctx context.Context, cluster string, re
 			if err := m.reader.Get(ctx, key, current); err != nil {
 				return err
 			}
-			if current.Status.AgenticRunStatus != nil && *current.Status.AgenticRunStatus == *observed {
+			before := current.DeepCopy()
+			if observed != nil {
+				if current.Status.AgenticRunStatus == nil {
+					current.Status.AgenticRunStatus = &ranv1alpha1.AgenticRunStatus{}
+				}
+				// A result can contain a summary before it has any conditions.
+				// Preserve the creation phase until a condition reason arrives.
+				if observed.Phase != "" {
+					current.Status.AgenticRunStatus.Phase = observed.Phase
+				}
+				current.Status.AgenticRunStatus.Summary = observed.Summary
+			}
+			current.Status.AgenticRunActionRequired = actionRequired
+			if reflect.DeepEqual(current.Status, before.Status) {
 				return nil
 			}
-			before := current.DeepCopy()
-			current.Status.AgenticRunStatus = observed
-			return m.hub.Status().Patch(ctx, current, client.MergeFrom(before))
+			return m.hub.Status().Patch(ctx, current, client.MergeFromWithOptions(before, client.MergeFromWithOptimisticLock{}))
 		}); err != nil {
 			log.FromContext(ctx).Error(err, "syncing hub run result", "record", key)
 		}

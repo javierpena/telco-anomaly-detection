@@ -25,7 +25,8 @@ func TestRecoverPendingRuns(t *testing.T) {
 				Name: "run-a", Namespace: operatorNamespace,
 				CreationTimestamp: metav1.NewTime(time.Now().Add(-3 * time.Minute)),
 				Annotations:       map[string]string{healthcheckrun.PendingAnnotation: "true"},
-			}, Status: ranv1alpha1.TelcoHealthCheckRunStatus{ClusterName: "cluster-a", AgenticRunName: "run-a"}}
+			}, Status: ranv1alpha1.TelcoHealthCheckRunStatus{ClusterName: "cluster-a", AgenticRunName: "run-a",
+				AgenticRunStatus: &ranv1alpha1.AgenticRunStatus{Phase: healthcheckrun.PhasePending}}}
 			hub := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(record).WithObjects(record, makeKubeconfigSecret("cluster-a")).Build()
 			spoke := fake.NewClientBuilder().WithScheme(runtime.NewScheme()).Build()
 			if present {
@@ -48,11 +49,13 @@ func TestRecoverPendingRuns(t *testing.T) {
 			got := &ranv1alpha1.TelcoHealthCheckRun{}
 			err = hub.Get(ctx, client.ObjectKeyFromObject(record), got)
 			if present {
-				if err != nil || got.Annotations[healthcheckrun.PendingAnnotation] != "" {
+				if err != nil || got.Annotations[healthcheckrun.PendingAnnotation] != "" ||
+					got.Status.AgenticRunStatus.Phase != healthcheckrun.PhaseCreated {
 					t.Fatalf("record not confirmed: %+v, %v", got, err)
 				}
-			} else if err == nil {
-				t.Fatalf("orphan record not removed: %+v", got)
+			} else if err != nil || got.Annotations[healthcheckrun.PendingAnnotation] != "" ||
+				got.Status.AgenticRunStatus.Phase != healthcheckrun.PhaseFailed {
+				t.Fatalf("failed record not retained: %+v, %v", got, err)
 			}
 		})
 	}

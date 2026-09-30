@@ -20,7 +20,7 @@ const pendingRunGrace = 2 * time.Minute
 
 // recoverPendingRuns checks whether pending hub records have a corresponding
 // spoke run. A network error during Create is ambiguous, so never recreate a
-// spoke run. A stale record with no corresponding run is removed.
+// spoke run. A stale record with no corresponding run is retained as Failed.
 func recoverPendingRuns(ctx context.Context, c client.Client, namespace string) (bool, error) {
 	var records ranv1alpha1.TelcoHealthCheckRunList
 	if err := c.List(ctx, &records, client.InNamespace(namespace)); err != nil {
@@ -56,8 +56,8 @@ func recoverPendingRuns(ctx context.Context, c client.Client, namespace string) 
 		run.SetGroupVersionKind(schema.GroupVersionKind{Group: agenticrun.Group, Version: agenticrun.Version, Kind: agenticrun.Kind})
 		err = spoke.Get(ctx, client.ObjectKey{Namespace: agenticrun.Namespace, Name: record.Status.AgenticRunName}, run)
 		if apierrors.IsNotFound(err) {
-			if err := c.Delete(ctx, record); err != nil && !apierrors.IsNotFound(err) {
-				log.FromContext(ctx).Error(err, "removing pending record without a spoke run", "name", record.Name)
+			if err := healthcheckrun.Fail(ctx, c, namespace, record.Name); err != nil {
+				log.FromContext(ctx).Error(err, "pending run recovery: marking creation failed", "name", record.Name)
 			}
 			continue
 		}

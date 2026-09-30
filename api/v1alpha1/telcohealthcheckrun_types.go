@@ -11,9 +11,11 @@ const (
 	TriggerTypePeriodicHealthCheck TriggerType = "periodicHealthCheck"
 )
 
-// AgenticRunStatus contains the latest observed AnalysisResult condition and conclusion.
+// AgenticRunStatus tracks spoke creation until an AnalysisResult is observed,
+// then contains its latest condition and conclusion.
 type AgenticRunStatus struct {
-	// Phase is the reason of the AnalysisResult condition with the latest lastTransitionTime.
+	// Phase is Pending during spoke creation, Created or Failed once its outcome
+	// is known, then the reason of the latest AnalysisResult condition.
 	// +optional
 	Phase string `json:"phase,omitempty"`
 	// Summary is taken from the result diagnosis, an option, or its failure reason.
@@ -32,6 +34,11 @@ type TelcoHealthCheckRunStatus struct {
 	Trigger        string      `json:"trigger"`
 	// +optional
 	AgenticRunStatus *AgenticRunStatus `json:"agenticRunStatus,omitempty"`
+	// AgenticRunActionRequired mirrors AnalysisResult.status.actionRequired.
+	// It is absent until the AnalysisResult reports "True" or "False".
+	// +optional
+	// +kubebuilder:validation:Enum=True;False
+	AgenticRunActionRequired string `json:"agenticRunActionRequired,omitempty"`
 }
 
 // +kubebuilder:object:root=true

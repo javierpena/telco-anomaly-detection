@@ -45,14 +45,15 @@ func TestHandleResultMatchesClusterAndRun(t *testing.T) {
 	makeRecord := func(name, clusterName string) *ranv1alpha1.TelcoHealthCheckRun {
 		return &ranv1alpha1.TelcoHealthCheckRun{ObjectMeta: metav1.ObjectMeta{
 			Name: name, Namespace: operatorNamespace, Labels: map[string]string{healthcheckrun.RunKeyLabel: healthcheckrun.Key(clusterName, run)},
-		}, Status: ranv1alpha1.TelcoHealthCheckRunStatus{ClusterName: clusterName, AgenticRunName: run}}
+		}, Status: ranv1alpha1.TelcoHealthCheckRunStatus{ClusterName: clusterName, AgenticRunName: run,
+			AgenticRunStatus: &ranv1alpha1.AgenticRunStatus{Phase: healthcheckrun.PhaseCreated}}}
 	}
 	hub := fake.NewClientBuilder().WithScheme(newTestScheme(t)).WithStatusSubresource(&ranv1alpha1.TelcoHealthCheckRun{}).
 		WithObjects(makeRecord("match", cluster), makeRecord("other", "cluster-b")).Build()
 	m := newSpokeWatchManager(hub, hub, operatorNamespace)
 	result := &unstructured.Unstructured{Object: map[string]interface{}{
 		"spec": map[string]interface{}{"agenticRunName": run},
-		"status": map[string]interface{}{"conditions": []interface{}{
+		"status": map[string]interface{}{"actionRequired": "True", "conditions": []interface{}{
 			map[string]interface{}{"lastTransitionTime": "2026-01-02T10:00:00Z", "reason": "Completed"},
 		}, "diagnosis": map[string]interface{}{"summary": "healthy"}},
 	}}
@@ -65,9 +66,51 @@ func TestHandleResultMatchesClusterAndRun(t *testing.T) {
 		if err := hub.Get(ctx, client.ObjectKey{Namespace: operatorNamespace, Name: tt.name}, record); err != nil {
 			t.Fatal(err)
 		}
-		if (record.Status.AgenticRunStatus != nil) != tt.want {
-			t.Errorf("record %s: unexpected result %+v", tt.name, record.Status.AgenticRunStatus)
+		if tt.want && (record.Status.AgenticRunStatus.Phase != "Completed" ||
+			record.Status.AgenticRunStatus.Summary != "healthy" || record.Status.AgenticRunActionRequired != "True") {
+			t.Errorf("record %s: unexpected result %+v", tt.name, record.Status)
 		}
+		if !tt.want && (record.Status.AgenticRunStatus.Phase != healthcheckrun.PhaseCreated || record.Status.AgenticRunActionRequired != "") {
+			t.Errorf("record %s: unexpectedly updated %+v", tt.name, record.Status)
+		}
+	}
+	status := result.Object["status"].(map[string]interface{})
+	status["actionRequired"] = "False"
+	status["conditions"] = []interface{}{map[string]interface{}{
+		"lastTransitionTime": "2026-01-02T11:00:00Z", "reason": "NoActionRequired",
+	}}
+	m.handleResult(ctx, cluster, result)
+	updated := &ranv1alpha1.TelcoHealthCheckRun{}
+	if err := hub.Get(ctx, client.ObjectKey{Namespace: operatorNamespace, Name: "match"}, updated); err != nil {
+		t.Fatal(err)
+	}
+	if updated.Status.AgenticRunActionRequired != "False" || updated.Status.AgenticRunStatus.Phase != "NoActionRequired" {
+		t.Fatalf("AnalysisResult update not reflected: %+v", updated.Status)
+	}
+}
+
+func TestHandleResultActionRequiredWithoutConditions(t *testing.T) {
+	ctx := context.Background()
+	const cluster, run = "cluster-a", "run-a"
+	record := &ranv1alpha1.TelcoHealthCheckRun{ObjectMeta: metav1.ObjectMeta{
+		Name: "match", Namespace: operatorNamespace,
+		Labels: map[string]string{healthcheckrun.RunKeyLabel: healthcheckrun.Key(cluster, run)},
+	}, Status: ranv1alpha1.TelcoHealthCheckRunStatus{
+		ClusterName: cluster, AgenticRunName: run,
+		AgenticRunStatus: &ranv1alpha1.AgenticRunStatus{Phase: healthcheckrun.PhaseCreated},
+	}}
+	hub := fake.NewClientBuilder().WithScheme(newTestScheme(t)).WithStatusSubresource(record).WithObjects(record).Build()
+	m := newSpokeWatchManager(hub, hub, operatorNamespace)
+	result := &unstructured.Unstructured{Object: map[string]interface{}{
+		"spec":   map[string]interface{}{"agenticRunName": run},
+		"status": map[string]interface{}{"actionRequired": "False"},
+	}}
+	m.handleResult(ctx, cluster, result)
+	if err := hub.Get(ctx, client.ObjectKeyFromObject(record), record); err != nil {
+		t.Fatal(err)
+	}
+	if record.Status.AgenticRunStatus.Phase != healthcheckrun.PhaseCreated || record.Status.AgenticRunActionRequired != "False" {
+		t.Fatalf("actionRequired not reflected independently: %+v", record.Status)
 	}
 }
 

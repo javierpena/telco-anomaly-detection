@@ -401,7 +401,12 @@ func (h *Handler) createAgenticRunOnCluster(ctx context.Context, kubeconfig []by
 	}
 
 	if err := spokeClient.Create(ctx, u); err != nil {
-		return fmt.Errorf("creating AgenticRun %s on cluster %s (pending record retained for recovery): %w", runName, clusterName, err)
+		if healthcheckrun.DefinitiveCreateError(err) {
+			if statusErr := healthcheckrun.Fail(ctx, h.HubClient, operatorNamespace, runName); statusErr != nil {
+				logger.Error(statusErr, "failed to record spoke creation failure; pending record will be checked", "cluster", clusterName, "name", runName)
+			}
+		}
+		return fmt.Errorf("creating AgenticRun %s on cluster %s (hub record retained): %w", runName, clusterName, err)
 	}
 	if err := healthcheckrun.Confirm(ctx, h.HubClient, operatorNamespace, runName); err != nil {
 		logger.Error(err, "failed to confirm hub record; controller will retry", "cluster", clusterName, "name", runName)

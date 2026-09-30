@@ -2,10 +2,12 @@ package alertreceiver
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -205,8 +207,54 @@ func TestProcessAlerts_MatchCreatesAgenticRun(t *testing.T) {
 	record := records.Items[0]
 	if record.Name != record.Status.AgenticRunName || record.Status.ClusterName != "cluster-a" ||
 		record.Status.Trigger != alertName || record.Status.TriggeredBy != ranv1alpha1.TriggerTypeAlert ||
+		record.Status.AgenticRunStatus == nil || record.Status.AgenticRunStatus.Phase != healthcheckrun.PhaseCreated ||
+		record.Status.AgenticRunActionRequired != "" ||
 		record.Annotations[healthcheckrun.PendingAnnotation] != "" || len(record.OwnerReferences) != 1 || record.OwnerReferences[0].UID != thc.UID {
 		t.Errorf("incorrect alert record: %+v", record)
+	}
+}
+
+type failingSpokeCreateClient struct {
+	client.Client
+	err error
+}
+
+func (c failingSpokeCreateClient) Create(context.Context, client.Object, ...client.CreateOption) error {
+	return c.err
+}
+
+func TestProcessAlerts_RecordsSpokeCreateFailure(t *testing.T) {
+	for _, tt := range []struct {
+		name, phase string
+		err         error
+	}{
+		{"definitive", healthcheckrun.PhaseFailed, apierrors.NewForbidden(schema.GroupResource{Group: agenticrun.Group, Resource: "agenticruns"}, "run", fmt.Errorf("denied"))},
+		{"ambiguous", healthcheckrun.PhasePending, fmt.Errorf("connection lost")},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			const alertName = "TelcoHealthCheckHostNetwork"
+			thc := makeTHCWithMonitoredClusters([]string{"cluster-a"})
+			hub := fake.NewClientBuilder().WithScheme(newHandlerScheme(t)).
+				WithStatusSubresource(thc, &ranv1alpha1.TelcoHealthCheckRun{}).
+				WithObjects(thc, makeKubeconfigSecretUnstructured("cluster-a"),
+					makeAlertNamesConfigMap([]string{alertName}),
+					makeSystemAlertConfigMap("telco-anomaly-host-network-config", operatorNamespace, alertName, "check host network")).Build()
+			h := &Handler{HubClient: hub, NewSpokeClient: func([]byte) (client.Client, error) {
+				return failingSpokeCreateClient{Client: fake.NewClientBuilder().WithScheme(runtime.NewScheme()).Build(), err: tt.err}, nil
+			}}
+			if err := h.processAlerts(context.Background(), []Alert{{
+				Status: "firing", Labels: map[string]string{"cluster": "cluster-a", "alertname": alertName},
+			}}); err != nil {
+				t.Fatal(err)
+			}
+			var records ranv1alpha1.TelcoHealthCheckRunList
+			if err := hub.List(context.Background(), &records, client.InNamespace(operatorNamespace)); err != nil {
+				t.Fatal(err)
+			}
+			if len(records.Items) != 1 || records.Items[0].Status.AgenticRunStatus.Phase != tt.phase {
+				t.Fatalf("unexpected failed run record: %+v", records.Items)
+			}
+		})
 	}
 }
 

@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -27,6 +28,47 @@ func makeAgenticRunConfigMap(name, namespace string) *corev1.ConfigMap {
 			"skills":     `[{"image":"quay.io/test:latest","paths":["/skills/test.yaml"]}]`,
 			"mcpServers": "[]",
 		},
+	}
+}
+
+type failingSpokeCreateClient struct {
+	client.Client
+	err error
+}
+
+func (c failingSpokeCreateClient) Create(context.Context, client.Object, ...client.CreateOption) error {
+	return c.err
+}
+
+func TestCreateAgenticRunsForClusters_RecordsSpokeCreateFailure(t *testing.T) {
+	for _, tt := range []struct {
+		name, phase string
+		err         error
+	}{
+		{"definitive", healthcheckrun.PhaseFailed, apierrors.NewForbidden(schema.GroupResource{Group: agenticrun.Group, Resource: "agenticruns"}, "run", fmt.Errorf("denied"))},
+		{"ambiguous", healthcheckrun.PhasePending, fmt.Errorf("connection lost")},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			original := buildSpokeClient
+			defer func() { buildSpokeClient = original }()
+			buildSpokeClient = func([]byte) (client.Client, error) {
+				return failingSpokeCreateClient{Client: fake.NewClientBuilder().WithScheme(runtime.NewScheme()).Build(), err: tt.err}, nil
+			}
+			hub := fake.NewClientBuilder().WithScheme(newTestScheme(t)).WithStatusSubresource(&ranv1alpha1.TelcoHealthCheckRun{}).WithObjects(
+				makeKubeconfigSecret("cluster-a"), makeAgenticRunConfigMap("telco-anomaly-rds-compliance-config", operatorNamespace),
+			).Build()
+			thc := &ranv1alpha1.TelcoHealthcheck{ObjectMeta: metav1.ObjectMeta{Name: ranv1alpha1.TelcoHealthcheckCanonicalName, UID: "owner"}}
+			if err := createAgenticRunsForClusters(context.Background(), hub, thc, []string{"cluster-a"}, "rds-compliance"); err != nil {
+				t.Fatal(err)
+			}
+			var records ranv1alpha1.TelcoHealthCheckRunList
+			if err := hub.List(context.Background(), &records, client.InNamespace(operatorNamespace)); err != nil {
+				t.Fatal(err)
+			}
+			if len(records.Items) != 1 || records.Items[0].Status.AgenticRunStatus.Phase != tt.phase {
+				t.Fatalf("unexpected failed run record: %+v", records.Items)
+			}
+		})
 	}
 }
 
@@ -91,6 +133,8 @@ func TestCreateAgenticRunsForClusters(t *testing.T) {
 		if record.Name != record.Status.AgenticRunName+"-"+record.Status.ClusterName ||
 			record.Status.TriggeredBy != ranv1alpha1.TriggerTypePeriodicHealthCheck ||
 			record.Status.Trigger != "rds-compliance" || record.Annotations[healthcheckrun.PendingAnnotation] != "" ||
+			record.Status.AgenticRunStatus == nil || record.Status.AgenticRunStatus.Phase != healthcheckrun.PhaseCreated ||
+			record.Status.AgenticRunActionRequired != "" ||
 			len(record.OwnerReferences) != 1 || record.OwnerReferences[0].UID != thc.UID {
 			t.Errorf("incorrect periodic record: %+v", record)
 		}

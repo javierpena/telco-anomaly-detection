@@ -6,6 +6,8 @@
 > `AnalysisResult.status.conditions[*].reason` (the CRD has no phase or summary
 > fields); keep a reconnecting list/watch per spoke instead of ending it after
 > one result; use the existing `telco-anomaly-operator` ServiceAccount for purge.
+> Run records now expose Pending/Created/Failed creation phases and mirror
+> `AnalysisResult.status.actionRequired` into the hub record's **status**.
 
 ## Background
 

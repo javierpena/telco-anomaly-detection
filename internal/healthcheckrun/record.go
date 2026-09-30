@@ -8,8 +8,10 @@ import (
 	"fmt"
 	"strings"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	ranv1alpha1 "github.com/javierpena/telco-anomaly-detection/api/v1alpha1"
@@ -18,6 +20,9 @@ import (
 const (
 	PendingAnnotation = "ran.openshift.io/spoke-creation-pending"
 	RunKeyLabel       = "ran.openshift.io/run-key"
+	PhasePending      = "Pending"
+	PhaseCreated      = "Created"
+	PhaseFailed       = "Failed"
 )
 
 // Key is a stable, label-safe identifier for a run on one spoke.
@@ -70,6 +75,7 @@ func Begin(ctx context.Context, c client.Client, namespace, name, runName, clust
 	record.Status = ranv1alpha1.TelcoHealthCheckRunStatus{
 		AgenticRunName: runName, ClusterName: clusterName,
 		TriggeredBy: triggeredBy, Trigger: trigger,
+		AgenticRunStatus: &ranv1alpha1.AgenticRunStatus{Phase: PhasePending},
 	}
 	if err := c.Status().Update(ctx, record); err != nil {
 		// No spoke create can be attempted without a complete durable identity.
@@ -80,14 +86,57 @@ func Begin(ctx context.Context, c client.Client, namespace, name, runName, clust
 
 // Confirm marks an existing record as paired with a created spoke run.
 func Confirm(ctx context.Context, c client.Client, namespace, name string) error {
-	record := &ranv1alpha1.TelcoHealthCheckRun{}
-	if err := c.Get(ctx, types.NamespacedName{Namespace: namespace, Name: name}, record); err != nil {
+	return finishCreation(ctx, c, namespace, name, PhaseCreated)
+}
+
+// Fail records a confirmed spoke creation failure without discarding the
+// hub-side audit trail. Ambiguous errors must instead remain Pending until
+// recovery checks whether the spoke run exists.
+func Fail(ctx context.Context, c client.Client, namespace, name string) error {
+	return finishCreation(ctx, c, namespace, name, PhaseFailed)
+}
+
+// DefinitiveCreateError returns true only when the API server explicitly
+// rejected creation. Transport errors and timeouts can happen after creation.
+func DefinitiveCreateError(err error) bool {
+	return apierrors.IsInvalid(err) || apierrors.IsBadRequest(err) ||
+		apierrors.IsForbidden(err) || apierrors.IsUnauthorized(err) ||
+		apierrors.IsNotFound(err) || apierrors.IsMethodNotSupported(err) ||
+		apierrors.IsRequestEntityTooLargeError(err)
+}
+
+func finishCreation(ctx context.Context, c client.Client, namespace, name, phase string) error {
+	key := types.NamespacedName{Namespace: namespace, Name: name}
+	// Update status first: if removing the annotation fails, recovery can retry
+	// without losing the creation outcome. Do not overwrite an AnalysisResult
+	// that arrived before this confirmation.
+	if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		record := &ranv1alpha1.TelcoHealthCheckRun{}
+		if err := c.Get(ctx, key, record); err != nil {
+			return err
+		}
+		if record.Annotations[PendingAnnotation] != "true" ||
+			(record.Status.AgenticRunStatus != nil && record.Status.AgenticRunStatus.Phase != PhasePending &&
+				(record.Status.AgenticRunStatus.Phase != "" || record.Status.AgenticRunStatus.Summary != "")) {
+			return nil
+		}
+		if record.Status.AgenticRunStatus == nil {
+			record.Status.AgenticRunStatus = &ranv1alpha1.AgenticRunStatus{}
+		}
+		record.Status.AgenticRunStatus.Phase = phase
+		return c.Status().Update(ctx, record)
+	}); err != nil {
 		return err
 	}
-	if record.Annotations[PendingAnnotation] != "true" {
-		return nil
-	}
-	before := record.DeepCopy()
-	delete(record.Annotations, PendingAnnotation)
-	return c.Patch(ctx, record, client.MergeFrom(before))
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		record := &ranv1alpha1.TelcoHealthCheckRun{}
+		if err := c.Get(ctx, key, record); err != nil {
+			return err
+		}
+		if record.Annotations[PendingAnnotation] != "true" {
+			return nil
+		}
+		delete(record.Annotations, PendingAnnotation)
+		return c.Update(ctx, record)
+	})
 }

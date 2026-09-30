@@ -343,21 +343,27 @@ The Go client library for `AgenticRun` is not yet published, so all objects are 
 | Periodic check | `telco-health-<checkType>-<unixNano>` |
 
 Each spoke create is preceded by a hub `TelcoHealthCheckRun` record with its
-identity and a pending annotation. The annotation is removed after the spoke
-create succeeds. If create or confirmation returns an ambiguous error, the
-controller checks that named spoke run after a grace period and confirms the
-record or removes it if the run does not exist. Recovery never creates a
-second spoke run. Both binaries use `internal/healthcheckrun/` for this flow.
+identity, a pending annotation, and `status.agenticRunStatus.phase: Pending`.
+Successful spoke creation changes the phase to `Created` and removes the
+annotation. A definitive API rejection changes the phase to `Failed`; the
+record is retained. If creation returns an ambiguous error (for example a
+timeout), it stays `Pending` while the controller checks the named spoke run
+after a grace period. Recovery sets `Created` if the run exists or `Failed`
+if it does not. It never creates a second spoke run. Both binaries use
+`internal/healthcheckrun/` for this flow.
 
 ### TelcoHealthCheckRun audit records
 
 `ran.openshift.io/v1alpha1` `TelcoHealthCheckRun` (`thcr`) is namespaced in
 `telco-healthcheck-system`. Its spec is empty. Status contains `clusterName`,
 `agenticRunName`, `triggeredBy` (`alert` or `periodicHealthCheck`), `trigger`,
-and optional `agenticRunStatus.{phase,summary}`. The record timestamp gives
-its age. Alert records use the spoke run name; periodic records append the
-cluster name because one run name is reused across spokes. Records carry the
-singleton owner reference and a hashed run/cluster label for correlation.
+`agenticRunStatus.{phase,summary}`, and optional `agenticRunActionRequired`.
+The latter mirrors `AnalysisResult.status.actionRequired` (`"True"` or
+`"False"`) and is omitted until Lightspeed provides a value. The record
+timestamp gives its age. Alert records use the spoke run name; periodic
+records append the cluster name because one run name is reused across spokes.
+Records carry the singleton owner reference and a hashed run/cluster label
+for correlation.
 
 The controller maintains one list/watch of `analysisresults.agentic.openshift.io`
 in `openshift-lightspeed` per monitored spoke. The list establishes a watch
@@ -366,8 +372,9 @@ reconnects on failure and continues after an individual run completes.
 Watches stop on cluster removal, singleton deletion, or shutdown. The result's
 `.spec.agenticRunName` identifies its run. The hub `phase` is the verbatim
 `reason` of the result condition with the latest `lastTransitionTime`, not an
-AgenticRun lifecycle phase. `summary` comes from the top-level diagnosis,
-first option diagnosis/summary, or failure reason. Removing a cluster leaves
+AgenticRun lifecycle phase. Until a result condition is available it retains
+the creation phase. `summary` comes from the top-level diagnosis, first option
+diagnosis/summary, or failure reason. Removing a cluster leaves
 its historical records with their last observed status.
 
 When `purgeInterval` is set, an hourly `batch/v1` CronJob uses the existing
