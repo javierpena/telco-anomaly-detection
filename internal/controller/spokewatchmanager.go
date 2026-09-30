@@ -25,6 +25,7 @@ import (
 )
 
 var analysisResultGVR = schema.GroupVersionResource{Group: agenticrun.Group, Version: agenticrun.Version, Resource: "analysisresults"}
+var executionResultGVR = schema.GroupVersionResource{Group: agenticrun.Group, Version: agenticrun.Version, Resource: "executionresults"}
 var agenticRunGVR = schema.GroupVersionResource{Group: agenticrun.Group, Version: agenticrun.Version, Resource: "agenticruns"}
 
 var newSpokeDynamicClient = func(cfg *rest.Config) (dynamic.Interface, error) {
@@ -36,7 +37,7 @@ type spokeWatch struct {
 	configHash [32]byte
 }
 
-// SpokeWatchManager maintains reconnecting AgenticRun and AnalysisResult
+// SpokeWatchManager maintains reconnecting AgenticRun and result
 // list/watches per monitored cluster. It is a manager runnable so its contexts
 // end on shutdown and (when enabled) on leader loss.
 type SpokeWatchManager struct {
@@ -129,7 +130,12 @@ func (m *SpokeWatchManager) Sync(ctx context.Context, clusters []string) {
 		m.watches[cluster] = spokeWatch{cancel: cancel, configHash: hash}
 		m.mu.Unlock()
 		go m.watchCluster(watchCtx, cluster, dyn, agenticRunGVR, m.handleRun)
-		go m.watchCluster(watchCtx, cluster, dyn, analysisResultGVR, m.handleResult)
+		go m.watchCluster(watchCtx, cluster, dyn, analysisResultGVR, func(ctx context.Context, cluster string, result *unstructured.Unstructured) {
+			m.handleResult(ctx, cluster, dyn, result)
+		})
+		go m.watchCluster(watchCtx, cluster, dyn, executionResultGVR, func(ctx context.Context, cluster string, result *unstructured.Unstructured) {
+			m.handleExecutionResult(ctx, cluster, dyn, result)
+		})
 	}
 }
 
@@ -137,18 +143,34 @@ type spokeHandler func(context.Context, string, *unstructured.Unstructured)
 
 func (m *SpokeWatchManager) watchCluster(ctx context.Context, cluster string, dyn dynamic.Interface, gvr schema.GroupVersionResource, handle spokeHandler) {
 	resource := dyn.Resource(gvr).Namespace(agenticrun.Namespace)
+	// Keep the last observed executions so a relist can recover deletions
+	// missed while the watch was disconnected.
+	seenExecutions := make(map[string]*unstructured.Unstructured)
 	for ctx.Err() == nil {
 		// List before Watch using the list resourceVersion to avoid a gap. Relist
 		// after every dropped watch, including expired resourceVersions.
 		list, err := resource.List(ctx, metav1.ListOptions{})
 		if err == nil {
+			currentExecutions := make(map[string]*unstructured.Unstructured)
 			for i := range list.Items {
-				handle(ctx, cluster, &list.Items[i])
+				object := &list.Items[i]
+				if gvr == executionResultGVR {
+					currentExecutions[object.GetName()] = object.DeepCopy()
+				}
+				handle(ctx, cluster, object)
+			}
+			if gvr == executionResultGVR {
+				for name, object := range seenExecutions {
+					if _, exists := currentExecutions[name]; !exists {
+						handle(ctx, cluster, object)
+					}
+				}
+				seenExecutions = currentExecutions
 			}
 			var stream watch.Interface
 			stream, err = resource.Watch(ctx, metav1.ListOptions{ResourceVersion: list.GetResourceVersion(), AllowWatchBookmarks: true})
 			if err == nil {
-				m.consume(ctx, cluster, stream, handle)
+				m.consume(ctx, cluster, gvr, stream, handle, seenExecutions)
 			}
 		}
 		if ctx.Err() != nil {
@@ -167,7 +189,7 @@ func (m *SpokeWatchManager) watchCluster(ctx context.Context, cluster string, dy
 	}
 }
 
-func (m *SpokeWatchManager) consume(ctx context.Context, cluster string, stream watch.Interface, handle spokeHandler) {
+func (m *SpokeWatchManager) consume(ctx context.Context, cluster string, gvr schema.GroupVersionResource, stream watch.Interface, handle spokeHandler, seenExecutions map[string]*unstructured.Unstructured) {
 	defer stream.Stop()
 	for {
 		select {
@@ -177,7 +199,8 @@ func (m *SpokeWatchManager) consume(ctx context.Context, cluster string, stream 
 			if !ok {
 				return
 			}
-			if event.Type != watch.Added && event.Type != watch.Modified {
+			if event.Type != watch.Added && event.Type != watch.Modified &&
+				(event.Type != watch.Deleted || gvr != executionResultGVR) {
 				if event.Type == watch.Error {
 					return
 				}
@@ -185,31 +208,107 @@ func (m *SpokeWatchManager) consume(ctx context.Context, cluster string, stream 
 			}
 			object, ok := event.Object.(*unstructured.Unstructured)
 			if ok {
+				if gvr == executionResultGVR {
+					if event.Type == watch.Deleted {
+						delete(seenExecutions, object.GetName())
+					} else {
+						seenExecutions[object.GetName()] = object.DeepCopy()
+					}
+				}
 				handle(ctx, cluster, object)
 			}
 		}
 	}
 }
 
-func (m *SpokeWatchManager) handleResult(ctx context.Context, cluster string, result *unstructured.Unstructured) {
+func (m *SpokeWatchManager) handleResult(ctx context.Context, cluster string, dyn dynamic.Interface, result *unstructured.Unstructured) {
 	runName, _, _ := unstructured.NestedString(result.Object, "spec", "agenticRunName")
 	if runName == "" {
 		return
+	}
+	m.statusMu.Lock()
+	defer m.statusMu.Unlock()
+	// A relisted AnalysisResult may arrive after an ExecutionResult. Check the
+	// spoke rather than relying on the order of independent watch streams.
+	hasExecution, err := resultExists(ctx, dyn, executionResultGVR, runName)
+	if err != nil {
+		log.FromContext(ctx).Error(err, "checking ExecutionResults", "cluster", cluster, "run", runName)
 	}
 	summary := extractResultSummary(result)
 	actionRequired, _, _ := unstructured.NestedString(result.Object, "status", "actionRequired")
 	if actionRequired != "True" && actionRequired != "False" {
 		actionRequired = ""
 	}
-	m.updateMatchingRecords(ctx, cluster, runName, func(current *ranv1alpha1.TelcoHealthCheckRun) {
+	if hasExecution {
+		actionRequired = "False"
+	}
+	m.updateMatchingRecordsLocked(ctx, cluster, runName, func(current *ranv1alpha1.TelcoHealthCheckRun) {
 		if summary != "" {
 			if current.Status.AgenticRunStatus == nil {
 				current.Status.AgenticRunStatus = &ranv1alpha1.AgenticRunStatus{}
 			}
 			current.Status.AgenticRunStatus.Summary = summary
 		}
+		// A failed spoke read cannot establish the absence of an execution.
+		// Still keep the independent analysis summary up to date.
+		if err == nil {
+			current.Status.AgenticRunActionRequired = actionRequired
+		}
+	})
+}
+
+// handleExecutionResult recomputes the value on creation, replay, and deletion.
+// A deleted result must not clear an action if another execution still exists.
+func (m *SpokeWatchManager) handleExecutionResult(ctx context.Context, cluster string, dyn dynamic.Interface, result *unstructured.Unstructured) {
+	runName, _, _ := unstructured.NestedString(result.Object, "spec", "agenticRunName")
+	if runName == "" {
+		return
+	}
+	m.statusMu.Lock()
+	defer m.statusMu.Unlock()
+	hasExecution, err := resultExists(ctx, dyn, executionResultGVR, runName)
+	if err != nil {
+		log.FromContext(ctx).Error(err, "checking ExecutionResults", "cluster", cluster, "run", runName)
+		return
+	}
+	actionRequired := "False"
+	if !hasExecution {
+		// No executions remain: recover the AnalysisResult value, including
+		// after a deletion or a dropped watch.
+		results, err := dyn.Resource(analysisResultGVR).Namespace(agenticrun.Namespace).List(ctx, metav1.ListOptions{})
+		if err != nil {
+			log.FromContext(ctx).Error(err, "checking AnalysisResults", "cluster", cluster, "run", runName)
+			return
+		}
+		actionRequired = ""
+		for i := range results.Items {
+			name, _, _ := unstructured.NestedString(results.Items[i].Object, "spec", "agenticRunName")
+			if name != runName {
+				continue
+			}
+			value, _, _ := unstructured.NestedString(results.Items[i].Object, "status", "actionRequired")
+			if value == "True" || value == "False" {
+				actionRequired = value
+			}
+		}
+	}
+	m.updateMatchingRecordsLocked(ctx, cluster, runName, func(current *ranv1alpha1.TelcoHealthCheckRun) {
 		current.Status.AgenticRunActionRequired = actionRequired
 	})
+}
+
+func resultExists(ctx context.Context, dyn dynamic.Interface, gvr schema.GroupVersionResource, runName string) (bool, error) {
+	results, err := dyn.Resource(gvr).Namespace(agenticrun.Namespace).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return false, err
+	}
+	for i := range results.Items {
+		name, _, _ := unstructured.NestedString(results.Items[i].Object, "spec", "agenticRunName")
+		if name == runName {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func (m *SpokeWatchManager) handleRun(ctx context.Context, cluster string, run *unstructured.Unstructured) {
@@ -227,10 +326,15 @@ func (m *SpokeWatchManager) handleRun(ctx context.Context, cluster string, run *
 }
 
 func (m *SpokeWatchManager) updateMatchingRecords(ctx context.Context, cluster, runName string, update func(*ranv1alpha1.TelcoHealthCheckRun)) {
-	// AgenticRun and AnalysisResult watches may replay the same run concurrently.
+	// Independent watches may replay the same run concurrently.
 	// Serialize their read/patch cycles so each update sees the other's fields.
 	m.statusMu.Lock()
 	defer m.statusMu.Unlock()
+	m.updateMatchingRecordsLocked(ctx, cluster, runName, update)
+}
+
+// Caller holds statusMu, including while reading the spoke's result state.
+func (m *SpokeWatchManager) updateMatchingRecordsLocked(ctx context.Context, cluster, runName string, update func(*ranv1alpha1.TelcoHealthCheckRun)) {
 	var records ranv1alpha1.TelcoHealthCheckRunList
 	if err := m.reader.List(ctx, &records, client.InNamespace(m.namespace),
 		client.MatchingLabels{healthcheckrun.RunKeyLabel: healthcheckrun.Key(cluster, runName)}); err != nil {

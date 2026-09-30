@@ -37,8 +37,10 @@ type TelcoHealthCheckRunStatus struct {
 	Trigger        string      `json:"trigger"`
 	// +optional
 	AgenticRunStatus *AgenticRunStatus `json:"agenticRunStatus,omitempty"`
-	// AgenticRunActionRequired mirrors AnalysisResult.status.actionRequired.
-	// It is absent until the AnalysisResult reports "True" or "False".
+	// AgenticRunActionRequired is True only when AnalysisResult reports
+	// actionRequired=True and no ExecutionResult exists for this AgenticRun.
+	// It is False if execution has started or analysis reports False, and is
+	// absent until either result provides a value.
 	// +optional
 	// +kubebuilder:validation:Enum=True;False
 	AgenticRunActionRequired string `json:"agenticRunActionRequired,omitempty"`
