@@ -25,6 +25,7 @@ import (
 )
 
 var analysisResultGVR = schema.GroupVersionResource{Group: agenticrun.Group, Version: agenticrun.Version, Resource: "analysisresults"}
+var agenticRunGVR = schema.GroupVersionResource{Group: agenticrun.Group, Version: agenticrun.Version, Resource: "agenticruns"}
 
 var newSpokeDynamicClient = func(cfg *rest.Config) (dynamic.Interface, error) {
 	return dynamic.NewForConfig(cfg)
@@ -35,14 +36,15 @@ type spokeWatch struct {
 	configHash [32]byte
 }
 
-// SpokeWatchManager maintains one reconnecting AnalysisResult list/watch per
-// monitored cluster. It is a manager runnable so its contexts end on shutdown
-// and (when enabled) on leader loss.
+// SpokeWatchManager maintains reconnecting AgenticRun and AnalysisResult
+// list/watches per monitored cluster. It is a manager runnable so its contexts
+// end on shutdown and (when enabled) on leader loss.
 type SpokeWatchManager struct {
 	hub       client.Client
 	reader    client.Reader
 	namespace string
 	mu        sync.Mutex
+	statusMu  sync.Mutex
 	ctx       context.Context
 	watches   map[string]spokeWatch
 }
@@ -94,7 +96,7 @@ func (m *SpokeWatchManager) Sync(ctx context.Context, clusters []string) {
 	for _, cluster := range clusters {
 		kubeconfig, err := getClusterKubeconfig(ctx, m.hub, cluster)
 		if err != nil {
-			log.FromContext(ctx).Error(err, "unable to watch spoke results", "cluster", cluster)
+			log.FromContext(ctx).Error(err, "unable to watch spoke runs and results", "cluster", cluster)
 			continue
 		}
 		hash := sha256.Sum256(kubeconfig)
@@ -126,31 +128,34 @@ func (m *SpokeWatchManager) Sync(ctx context.Context, clusters []string) {
 		watchCtx, cancel := context.WithCancel(m.ctx)
 		m.watches[cluster] = spokeWatch{cancel: cancel, configHash: hash}
 		m.mu.Unlock()
-		go m.watchCluster(watchCtx, cluster, dyn)
+		go m.watchCluster(watchCtx, cluster, dyn, agenticRunGVR, m.handleRun)
+		go m.watchCluster(watchCtx, cluster, dyn, analysisResultGVR, m.handleResult)
 	}
 }
 
-func (m *SpokeWatchManager) watchCluster(ctx context.Context, cluster string, dyn dynamic.Interface) {
-	resource := dyn.Resource(analysisResultGVR).Namespace(agenticrun.Namespace)
+type spokeHandler func(context.Context, string, *unstructured.Unstructured)
+
+func (m *SpokeWatchManager) watchCluster(ctx context.Context, cluster string, dyn dynamic.Interface, gvr schema.GroupVersionResource, handle spokeHandler) {
+	resource := dyn.Resource(gvr).Namespace(agenticrun.Namespace)
 	for ctx.Err() == nil {
 		// List before Watch using the list resourceVersion to avoid a gap. Relist
 		// after every dropped watch, including expired resourceVersions.
 		list, err := resource.List(ctx, metav1.ListOptions{})
 		if err == nil {
 			for i := range list.Items {
-				m.handleResult(ctx, cluster, &list.Items[i])
+				handle(ctx, cluster, &list.Items[i])
 			}
 			var stream watch.Interface
 			stream, err = resource.Watch(ctx, metav1.ListOptions{ResourceVersion: list.GetResourceVersion(), AllowWatchBookmarks: true})
 			if err == nil {
-				m.consume(ctx, cluster, stream)
+				m.consume(ctx, cluster, stream, handle)
 			}
 		}
 		if ctx.Err() != nil {
 			return
 		}
 		if err != nil {
-			log.FromContext(ctx).Error(err, "spoke AnalysisResult watch failed", "cluster", cluster)
+			log.FromContext(ctx).Error(err, "spoke watch failed", "cluster", cluster, "resource", gvr.Resource)
 		}
 		timer := time.NewTimer(10 * time.Second)
 		select {
@@ -162,7 +167,7 @@ func (m *SpokeWatchManager) watchCluster(ctx context.Context, cluster string, dy
 	}
 }
 
-func (m *SpokeWatchManager) consume(ctx context.Context, cluster string, stream watch.Interface) {
+func (m *SpokeWatchManager) consume(ctx context.Context, cluster string, stream watch.Interface, handle spokeHandler) {
 	defer stream.Stop()
 	for {
 		select {
@@ -178,9 +183,9 @@ func (m *SpokeWatchManager) consume(ctx context.Context, cluster string, stream 
 				}
 				continue
 			}
-			result, ok := event.Object.(*unstructured.Unstructured)
+			object, ok := event.Object.(*unstructured.Unstructured)
 			if ok {
-				m.handleResult(ctx, cluster, result)
+				handle(ctx, cluster, object)
 			}
 		}
 	}
@@ -191,11 +196,40 @@ func (m *SpokeWatchManager) handleResult(ctx context.Context, cluster string, re
 	if runName == "" {
 		return
 	}
-	observed := extractResultStatus(result)
+	summary := extractResultSummary(result)
 	actionRequired, _, _ := unstructured.NestedString(result.Object, "status", "actionRequired")
 	if actionRequired != "True" && actionRequired != "False" {
 		actionRequired = ""
 	}
+	m.updateMatchingRecords(ctx, cluster, runName, func(current *ranv1alpha1.TelcoHealthCheckRun) {
+		if summary != "" {
+			if current.Status.AgenticRunStatus == nil {
+				current.Status.AgenticRunStatus = &ranv1alpha1.AgenticRunStatus{}
+			}
+			current.Status.AgenticRunStatus.Summary = summary
+		}
+		current.Status.AgenticRunActionRequired = actionRequired
+	})
+}
+
+func (m *SpokeWatchManager) handleRun(ctx context.Context, cluster string, run *unstructured.Unstructured) {
+	phase := latestConditionReason(run)
+	if phase == "" || run.GetName() == "" {
+		return
+	}
+	m.updateMatchingRecords(ctx, cluster, run.GetName(), func(current *ranv1alpha1.TelcoHealthCheckRun) {
+		if current.Status.AgenticRunStatus == nil {
+			current.Status.AgenticRunStatus = &ranv1alpha1.AgenticRunStatus{}
+		}
+		current.Status.AgenticRunStatus.Phase = phase
+	})
+}
+
+func (m *SpokeWatchManager) updateMatchingRecords(ctx context.Context, cluster, runName string, update func(*ranv1alpha1.TelcoHealthCheckRun)) {
+	// AgenticRun and AnalysisResult watches may replay the same run concurrently.
+	// Serialize their read/patch cycles so each update sees the other's fields.
+	m.statusMu.Lock()
+	defer m.statusMu.Unlock()
 	var records ranv1alpha1.TelcoHealthCheckRunList
 	if err := m.reader.List(ctx, &records, client.InNamespace(m.namespace),
 		client.MatchingLabels{healthcheckrun.RunKeyLabel: healthcheckrun.Key(cluster, runName)}); err != nil {
@@ -213,32 +247,26 @@ func (m *SpokeWatchManager) handleResult(ctx context.Context, cluster string, re
 				return err
 			}
 			before := current.DeepCopy()
-			if observed != nil {
-				if current.Status.AgenticRunStatus == nil {
-					current.Status.AgenticRunStatus = &ranv1alpha1.AgenticRunStatus{}
-				}
-				// A result can contain a summary before it has any conditions.
-				// Preserve the creation phase until a condition reason arrives.
-				if observed.Phase != "" {
-					current.Status.AgenticRunStatus.Phase = observed.Phase
-				}
-				current.Status.AgenticRunStatus.Summary = observed.Summary
+			// Check the identity again after fetching: a record could have changed
+			// between the indexed list and this read.
+			if current.Status.AgenticRunName != runName || current.Status.ClusterName != cluster {
+				return nil
 			}
-			current.Status.AgenticRunActionRequired = actionRequired
+			update(current)
 			if reflect.DeepEqual(current.Status, before.Status) {
 				return nil
 			}
 			return m.hub.Status().Patch(ctx, current, client.MergeFromWithOptions(before, client.MergeFromWithOptimisticLock{}))
 		}); err != nil {
-			log.FromContext(ctx).Error(err, "syncing hub run result", "record", key)
+			log.FromContext(ctx).Error(err, "syncing hub run status", "record", key)
 		}
 	}
 }
 
-// extractResultStatus maps the current Lightspeed AnalysisResult schema. There
-// is no .status.phase or .status.summary on that CRD.
-func extractResultStatus(result *unstructured.Unstructured) *ranv1alpha1.AgenticRunStatus {
-	conditions, _, _ := unstructured.NestedSlice(result.Object, "status", "conditions")
+// latestConditionReason selects the reason of the most recently transitioned
+// condition, ignoring conditions without a valid timestamp.
+func latestConditionReason(object *unstructured.Unstructured) string {
+	conditions, _, _ := unstructured.NestedSlice(object.Object, "status", "conditions")
 	var newest time.Time
 	var phase string
 	for _, item := range conditions {
@@ -256,6 +284,11 @@ func extractResultStatus(result *unstructured.Unstructured) *ranv1alpha1.Agentic
 			phase, _ = condition["reason"].(string)
 		}
 	}
+	return phase
+}
+
+// extractResultSummary maps the current Lightspeed AnalysisResult schema.
+func extractResultSummary(result *unstructured.Unstructured) string {
 	summary, _, _ := unstructured.NestedString(result.Object, "status", "diagnosis", "summary")
 	if summary == "" {
 		options, _, _ := unstructured.NestedSlice(result.Object, "status", "options")
@@ -276,8 +309,5 @@ func extractResultStatus(result *unstructured.Unstructured) *ranv1alpha1.Agentic
 	if summary == "" {
 		summary, _, _ = unstructured.NestedString(result.Object, "status", "failureReason")
 	}
-	if phase == "" && summary == "" {
-		return nil
-	}
-	return &ranv1alpha1.AgenticRunStatus{Phase: phase, Summary: summary}
+	return summary
 }

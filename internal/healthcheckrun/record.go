@@ -108,8 +108,8 @@ func DefinitiveCreateError(err error) bool {
 func finishCreation(ctx context.Context, c client.Client, namespace, name, phase string) error {
 	key := types.NamespacedName{Namespace: namespace, Name: name}
 	// Update status first: if removing the annotation fails, recovery can retry
-	// without losing the creation outcome. Do not overwrite an AnalysisResult
-	// that arrived before this confirmation.
+	// without losing the creation outcome. Do not overwrite an AgenticRun
+	// condition that arrived before this confirmation.
 	if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		record := &ranv1alpha1.TelcoHealthCheckRun{}
 		if err := c.Get(ctx, key, record); err != nil {

@@ -9,7 +9,7 @@ This operator runs on an OpenShift hub cluster managed by Red Hat Advanced Clust
 1. Configuring Thanos alert rules that fire when network conditions degrade.
 2. Forwarding those alerts to an alert receiver webhook.
 3. On each alert (or on a periodic schedule), creating an `AgenticRun` resource on the affected spoke cluster so that OpenShift Lightspeed can investigate the anomaly autonomously.
-4. Keeping a hub-side `TelcoHealthCheckRun` record for each spoke run and synchronizing its `AnalysisResult` conclusion.
+4. Keeping a hub-side `TelcoHealthCheckRun` record for each spoke run and synchronizing its AgenticRun condition and `AnalysisResult` conclusion.
 
 ---
 
@@ -240,7 +240,7 @@ Triggered by changes to the singleton `TelcoHealthcheck` CR or `ManagedCluster` 
 2. **Deletion path** — if `DeletionTimestamp` is set, run cleanup then remove the finalizer.
 3. **Finalizer** — ensure `ran.openshift.io/telcohealthcheck-finalizer` is registered; return early if just added (triggers a new reconcile).
 4. **Log level sync** — read `spec.logLevel` from the CR; set the logger's atomic level to `debug` or `info` accordingly.
-4a. **Resolve monitored clusters and sync spoke watches** (`getMonitoredClusters`) — list `ManagedCluster` resources and apply include/exclude rules, then start/cancel AnalysisResult list/watches (including credential changes).
+4a. **Resolve monitored clusters and sync spoke watches** (`getMonitoredClusters`) — list `ManagedCluster` resources and apply include/exclude rules, then start/cancel AgenticRun and AnalysisResult list/watches (including credential changes).
 4b. **Recover pending records** — check stale pending hub records against their spoke runs. This and watch sync precede managed-resource reconciliation so unrelated resource errors cannot stop result tracking.
 5. **Reconcile system-alert ConfigMaps** (`reconcileSystemAlertConfigMaps`) — for each of the four system alerts (`hostNetwork`, `podNetwork`, `hostReservedCPU`, `ovsProcessCPU`), creates or updates the corresponding ConfigMap in the operator namespace from the embedded asset file when the spec boolean is `true`, and deletes it when `false`. Must run before the alert-rule listing step. Returns an error (requeueing) if any create/update/delete fails.
 5a. **Reconcile system-periodic ConfigMaps** (`reconcileSystemPeriodicConfigMaps`) — for each periodic check type (`rdsCompliance`), creates or updates the corresponding ConfigMap in the operator namespace from the embedded asset file when the spec boolean is `true`, and deletes it when `false`. Mirrors the behaviour of step 5 for system-alert ConfigMaps. Returns an error (requeueing) if any create/update/delete fails.
@@ -369,17 +369,20 @@ for correlation.
 the cluster, trigger, AgenticRun, and phase. It shows `<none>` until the
 AnalysisResult supplies a value.
 
-The controller maintains one list/watch of `analysisresults.agentic.openshift.io`
-in `openshift-lightspeed` per monitored spoke. The list establishes a watch
-resourceVersion and replays existing results after disconnects. The watch
-reconnects on failure and continues after an individual run completes.
-Watches stop on cluster removal, singleton deletion, or shutdown. The result's
-`.spec.agenticRunName` identifies its run. The hub `phase` is the verbatim
-`reason` of the result condition with the latest `lastTransitionTime`, not an
-AgenticRun lifecycle phase. Until a result condition is available it retains
-the creation phase. `summary` comes from the top-level diagnosis, first option
-diagnosis/summary, or failure reason. Removing a cluster leaves
-its historical records with their last observed status.
+The controller maintains separate list/watches of `agenticruns.agentic.openshift.io`
+and `analysisresults.agentic.openshift.io` in `openshift-lightspeed` per monitored
+spoke. Each list establishes its watch resourceVersion and replays existing
+objects after disconnects. The watches reconnect on failure and continue after
+individual runs complete. They stop on cluster removal, singleton deletion,
+or shutdown. The AgenticRun name and the AnalysisResult's
+`.spec.agenticRunName` identify the corresponding hub run. The hub `phase` is
+the verbatim `reason` of the AgenticRun condition with the latest valid
+`lastTransitionTime`, not the `status.phase` lifecycle field. Until such a
+condition is available it retains the creation phase. AnalysisResult updates
+do not change the phase: `summary` comes from the top-level diagnosis, first
+option diagnosis/summary, or failure reason; `agenticRunActionRequired` comes
+from `status.actionRequired`. Removing a cluster leaves its historical records
+with their last observed status.
 
 When `purgeInterval` is set, an hourly `batch/v1` CronJob uses the existing
 `telco-anomaly-operator` ServiceAccount to remove records past that age.
@@ -604,8 +607,8 @@ Secret namespace: <clusterName>
 Secret key:       kubeconfig
 ```
 
-The controller and alert receiver both build a spoke-side `client.Client` from these bytes via `clientcmd.RESTConfigFromKubeConfig`. The spoke client creates AgenticRuns and checks pending run identities in `openshift-lightspeed`. The controller also builds a dynamic spoke client to list/watch AnalysisResults there.
-The ACM admin kubeconfig must permit `get` on AgenticRuns and `list`/`watch` on AnalysisResults in that namespace; those permissions are evaluated on the spoke, not by the hub ClusterRole.
+The controller and alert receiver both build a spoke-side `client.Client` from these bytes via `clientcmd.RESTConfigFromKubeConfig`. The spoke client creates AgenticRuns and checks pending run identities in `openshift-lightspeed`. The controller also builds a dynamic spoke client to list/watch AgenticRuns and AnalysisResults there.
+The ACM admin kubeconfig must permit `get`/`list`/`watch` on AgenticRuns and `list`/`watch` on AnalysisResults in that namespace; those permissions are evaluated on the spoke, not by the hub ClusterRole.
 
 ---
 

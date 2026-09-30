@@ -11,11 +11,11 @@ const (
 	TriggerTypePeriodicHealthCheck TriggerType = "periodicHealthCheck"
 )
 
-// AgenticRunStatus tracks spoke creation until an AnalysisResult is observed,
-// then contains its latest condition and conclusion.
+// AgenticRunStatus tracks spoke creation, then the AgenticRun's latest
+// condition reason and the AnalysisResult conclusion.
 type AgenticRunStatus struct {
 	// Phase is Pending during spoke creation, Created or Failed once its outcome
-	// is known, then the reason of the latest AnalysisResult condition.
+	// is known, then the reason of the latest AgenticRun condition.
 	// +optional
 	Phase string `json:"phase,omitempty"`
 	// Summary is taken from the result diagnosis, an option, or its failure reason.
