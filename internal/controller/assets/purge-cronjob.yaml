@@ -22,7 +22,7 @@ spec:
               type: RuntimeDefault
           containers:
             - name: purge
-              image: registry.redhat.io/openshift4/ose-cli:latest
+              image: registry.redhat.io/openshift4/ose-cli-rhel9:v4.22
               securityContext:
                 allowPrivilegeEscalation: false
                 capabilities:

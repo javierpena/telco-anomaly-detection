@@ -217,7 +217,7 @@ When `spec.purgeInterval` is set, the controller reconciles a `CronJob` named `t
 
 **ServiceAccount**: the CronJob runs under the operator's existing `ServiceAccount` (`telco-healthcheck-controller-manager` in `telco-healthcheck-system`). No additional `ServiceAccount`, `Role`, or `RoleBinding` is required — the operator's SA already has the necessary permissions on `telcohealthcheckruns`.
 
-**Container**: a standard `oc` image (e.g. `registry.redhat.io/openshift4/ose-cli:latest`). The purge script computes a cutoff timestamp from `PURGE_INTERVAL_SECONDS` and deletes matching resources:
+**Container**: a standard `oc` image (e.g. `registry.redhat.io/openshift4/ose-cli-rhel9:v4.22`). The purge script computes a cutoff timestamp from `PURGE_INTERVAL_SECONDS` and deletes matching resources:
 
 ```bash
 #!/bin/bash
@@ -255,7 +255,7 @@ spec:
           restartPolicy: OnFailure
           containers:
             - name: purge
-              image: registry.redhat.io/openshift4/ose-cli:latest
+              image: registry.redhat.io/openshift4/ose-cli-rhel9:v4.22
               command:
                 - /bin/bash
                 - -c
