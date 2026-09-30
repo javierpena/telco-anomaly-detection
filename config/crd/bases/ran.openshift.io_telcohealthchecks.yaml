@@ -19,7 +19,7 @@ spec:
   - additionalPrinterColumns:
     - jsonPath: .status.monitoredClusters
       name: Clusters
-      type: integer
+      type: string
     - jsonPath: .metadata.creationTimestamp
       name: Age
       type: date

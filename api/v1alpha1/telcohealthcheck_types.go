@@ -103,7 +103,7 @@ type TelcoHealthcheckStatus struct {
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:scope=Cluster,shortName=thc
-// +kubebuilder:printcolumn:name="Clusters",type=integer,JSONPath=`.status.monitoredClusters`
+// +kubebuilder:printcolumn:name="Clusters",type=string,JSONPath=`.status.monitoredClusters`
 // +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
 // TelcoHealthcheck monitors telco workload health across ACM managed clusters.
 type TelcoHealthcheck struct {
