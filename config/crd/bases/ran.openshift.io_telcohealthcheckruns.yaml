@@ -20,12 +20,6 @@ spec:
     - jsonPath: .status.clusterName
       name: Cluster
       type: string
-    - jsonPath: .status.triggeredBy
-      name: Triggered By
-      type: string
-    - jsonPath: .status.trigger
-      name: Trigger
-      type: string
     - jsonPath: .status.agenticRunName
       name: AgenticRun
       type: string

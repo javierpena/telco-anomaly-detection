@@ -48,8 +48,6 @@ type TelcoHealthCheckRunStatus struct {
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:scope=Namespaced,shortName=thcr
 // +kubebuilder:printcolumn:name="Cluster",type=string,JSONPath=`.status.clusterName`
-// +kubebuilder:printcolumn:name="Triggered By",type=string,JSONPath=`.status.triggeredBy`
-// +kubebuilder:printcolumn:name="Trigger",type=string,JSONPath=`.status.trigger`
 // +kubebuilder:printcolumn:name="AgenticRun",type=string,JSONPath=`.status.agenticRunName`
 // +kubebuilder:printcolumn:name="Type",type=string,JSONPath=`.status.agenticRunStatus.type`
 // +kubebuilder:printcolumn:name="Phase",type=string,JSONPath=`.status.agenticRunStatus.phase`

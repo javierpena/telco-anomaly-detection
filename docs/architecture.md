@@ -366,10 +366,10 @@ Records carry the singleton owner reference and a hashed run/cluster label
 for correlation.
 
 `oc get thcr -n telco-healthcheck-system` displays Type immediately before
-Phase, followed by Action Required alongside the cluster, trigger, and
-AgenticRun. Type and Phase are populated from the type and reason of the same
-latest AgenticRun condition. Type shows `<none>` until a condition is observed;
-Action Required shows `<none>` until the AnalysisResult supplies a value.
+Phase, with Cluster, AgenticRun, Action Required, and Age. Type and Phase are
+populated from the type and reason of the same latest AgenticRun condition.
+Type shows `<none>` until a condition is observed; Action Required shows
+`<none>` until the AnalysisResult supplies a value.
 
 The controller maintains separate list/watches of `agenticruns.agentic.openshift.io`
 and `analysisresults.agentic.openshift.io` in `openshift-lightspeed` per monitored
