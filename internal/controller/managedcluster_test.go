@@ -4,6 +4,7 @@ import (
 	"context"
 	"testing"
 
+	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -16,6 +17,9 @@ import (
 func newTestScheme(t *testing.T) *runtime.Scheme {
 	t.Helper()
 	s := runtime.NewScheme()
+	if err := batchv1.AddToScheme(s); err != nil {
+		t.Fatalf("adding batchv1 to scheme: %v", err)
+	}
 	if err := corev1.AddToScheme(s); err != nil {
 		t.Fatalf("adding corev1 to scheme: %v", err)
 	}

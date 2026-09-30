@@ -9,6 +9,7 @@ This operator runs on an OpenShift hub cluster managed by Red Hat Advanced Clust
 1. Configuring Thanos alert rules that fire when network conditions degrade.
 2. Forwarding those alerts to an alert receiver webhook.
 3. On each alert (or on a periodic schedule), creating an `AgenticRun` resource on the affected spoke cluster so that OpenShift Lightspeed can investigate the anomaly autonomously.
+4. Keeping a hub-side `TelcoHealthCheckRun` record for each spoke run and synchronizing its `AnalysisResult` conclusion.
 
 ---
 
@@ -163,6 +164,7 @@ The receiver validates `labels.alertname` against the Thanos rules it wrote itse
 | `periodicHealthChecks.rdsCompliance.enabled` | `bool` | Activate the RDS compliance periodic check. |
 | `periodicHealthChecks.rdsCompliance.period` | `duration` | Override interval for the RDS compliance check. |
 | `logLevel` | `info\|debug` | Controls log verbosity in both pods. Changes take effect on next reconcile without restart. |
+| `purgeInterval` | `duration` (optional) | Maximum age of hub run records; when set, an hourly CronJob removes expired records. Must be a positive whole number of seconds. |
 
 ### Status fields
 
@@ -238,10 +240,12 @@ Triggered by changes to the singleton `TelcoHealthcheck` CR or `ManagedCluster` 
 2. **Deletion path** — if `DeletionTimestamp` is set, run cleanup then remove the finalizer.
 3. **Finalizer** — ensure `ran.openshift.io/telcohealthcheck-finalizer` is registered; return early if just added (triggers a new reconcile).
 4. **Log level sync** — read `spec.logLevel` from the CR; set the logger's atomic level to `debug` or `info` accordingly.
+4a. **Resolve monitored clusters and sync spoke watches** (`getMonitoredClusters`) — list `ManagedCluster` resources and apply include/exclude rules, then start/cancel AnalysisResult list/watches (including credential changes).
+4b. **Recover pending records** — check stale pending hub records against their spoke runs. This and watch sync precede managed-resource reconciliation so unrelated resource errors cannot stop result tracking.
 5. **Reconcile system-alert ConfigMaps** (`reconcileSystemAlertConfigMaps`) — for each of the four system alerts (`hostNetwork`, `podNetwork`, `hostReservedCPU`, `ovsProcessCPU`), creates or updates the corresponding ConfigMap in the operator namespace from the embedded asset file when the spec boolean is `true`, and deletes it when `false`. Must run before the alert-rule listing step. Returns an error (requeueing) if any create/update/delete fails.
 5a. **Reconcile system-periodic ConfigMaps** (`reconcileSystemPeriodicConfigMaps`) — for each periodic check type (`rdsCompliance`), creates or updates the corresponding ConfigMap in the operator namespace from the embedded asset file when the spec boolean is `true`, and deletes it when `false`. Mirrors the behaviour of step 5 for system-alert ConfigMaps. Returns an error (requeueing) if any create/update/delete fails.
 5b. **Reconcile kube-compare-mcp** (`reconcileKubeCompareMCP`) — when `rdsCompliance.enabled` is true, creates the registry credentials secret and applies the kube-compare-mcp ServiceAccount, ClusterRole, ClusterRoleBinding, Deployment, Service, and Route via server-side apply. When false, removes all of those resources. Returns an error that stops the reconcile if any step fails.
-6. **Resolve monitored clusters** (`getMonitoredClusters`) — list all `ManagedCluster` resources and apply include/exclude rules from the spec. Result stored in `status.monitoredClusters`.
+5c. **Reconcile purge CronJob** — create/update `telco-healthcheck-purge` when `spec.purgeInterval` is set; remove it otherwise.
 7. **Reconcile Thanos alert rules** (`reconcileAlertRules`) — lists system-alert ConfigMaps (always) and user-alert ConfigMaps (when `userAlerts` is true) in the operator namespace, builds a unified Prometheus YAML from their `alertRule` fields, and creates or updates `thanos-ruler-custom-rules` in `open-cluster-management-observability`. Group names come from `alertGroupName` (system alerts) or default to `telco-user-<alertname-lowercased>` (user alerts). Non-fatal if this fails.
 8. **Reconcile AlertManager receiver** (`reconcileAlertManagerReceiver`) — read the `alertmanager-config` Secret in `open-cluster-management-observability`, upsert a webhook receiver entry pointing to the alert receiver service URL. Non-fatal if this fails.
 8a. **Reconcile MCO custom metrics allowlist** (`reconcileObservabilityMetrics`) — same listing pattern as step 7; deduplicates and writes all metric names from `alertMetrics` fields to `observability-metrics-custom-allowlist` in `open-cluster-management-observability`. Non-fatal if this fails.
@@ -257,6 +261,7 @@ Triggered by changes to the singleton `TelcoHealthcheck` CR or `ManagedCluster` 
 3. Remove all kube-compare-mcp resources (`cleanupKubeCompareMCP`) — idempotent, ignores not-found.
 4. Delete the `observability-metrics-custom-allowlist` ConfigMap (`cleanupObservabilityMetrics`) — idempotent, ignores not-found.
 5. Delete all four system-alert ConfigMaps (`cleanupSystemAlertConfigMaps`) — idempotent, ignores not-found.
+6. Stop spoke watches and remove the purge CronJob. Hub run records carry an owner reference to the cluster-scoped singleton and are garbage-collected when it is deleted.
 
 ---
 
@@ -336,6 +341,40 @@ The Go client library for `AgenticRun` is not yet published, so all objects are 
 |---|---|
 | Alert | `telco-alert-<alertName>-<unixNano>` |
 | Periodic check | `telco-health-<checkType>-<unixNano>` |
+
+Each spoke create is preceded by a hub `TelcoHealthCheckRun` record with its
+identity and a pending annotation. The annotation is removed after the spoke
+create succeeds. If create or confirmation returns an ambiguous error, the
+controller checks that named spoke run after a grace period and confirms the
+record or removes it if the run does not exist. Recovery never creates a
+second spoke run. Both binaries use `internal/healthcheckrun/` for this flow.
+
+### TelcoHealthCheckRun audit records
+
+`ran.openshift.io/v1alpha1` `TelcoHealthCheckRun` (`thcr`) is namespaced in
+`telco-healthcheck-system`. Its spec is empty. Status contains `clusterName`,
+`agenticRunName`, `triggeredBy` (`alert` or `periodicHealthCheck`), `trigger`,
+and optional `agenticRunStatus.{phase,summary}`. The record timestamp gives
+its age. Alert records use the spoke run name; periodic records append the
+cluster name because one run name is reused across spokes. Records carry the
+singleton owner reference and a hashed run/cluster label for correlation.
+
+The controller maintains one list/watch of `analysisresults.agentic.openshift.io`
+in `openshift-lightspeed` per monitored spoke. The list establishes a watch
+resourceVersion and replays existing results after disconnects. The watch
+reconnects on failure and continues after an individual run completes.
+Watches stop on cluster removal, singleton deletion, or shutdown. The result's
+`.spec.agenticRunName` identifies its run. The hub `phase` is the verbatim
+`reason` of the result condition with the latest `lastTransitionTime`, not an
+AgenticRun lifecycle phase. `summary` comes from the top-level diagnosis,
+first option diagnosis/summary, or failure reason. Removing a cluster leaves
+its historical records with their last observed status.
+
+When `purgeInterval` is set, an hourly `batch/v1` CronJob uses the existing
+`telco-anomaly-operator` ServiceAccount to remove records past that age.
+The embedded asset is `internal/controller/assets/purge-cronjob.yaml`.
+Removing the setting deletes the CronJob; deleting the singleton garbage-
+collects the CronJob and its run records.
 
 ### Labels applied
 
@@ -554,7 +593,8 @@ Secret namespace: <clusterName>
 Secret key:       kubeconfig
 ```
 
-The controller and alert receiver both build a spoke-side `client.Client` from these bytes via `clientcmd.RESTConfigFromKubeConfig`. The spoke client is used exclusively to create `AgenticRun` objects in `openshift-lightspeed`.
+The controller and alert receiver both build a spoke-side `client.Client` from these bytes via `clientcmd.RESTConfigFromKubeConfig`. The spoke client creates AgenticRuns and checks pending run identities in `openshift-lightspeed`. The controller also builds a dynamic spoke client to list/watch AnalysisResults there.
+The ACM admin kubeconfig must permit `get` on AgenticRuns and `list`/`watch` on AnalysisResults in that namespace; those permissions are evaluated on the spoke, not by the hub ClusterRole.
 
 ---
 
@@ -562,7 +602,7 @@ The controller and alert receiver both build a spoke-side `client.Client` from t
 
 | Namespace | Cluster | Purpose |
 |---|---|---|
-| `telco-healthcheck-system` | Hub | Operator pods, ServiceAccount, AgenticRun config ConfigMaps |
+| `telco-healthcheck-system` | Hub | Operator pods, ServiceAccount, AgenticRun config ConfigMaps, TelcoHealthCheckRun records, optional purge CronJob |
 | `open-cluster-management-observability` | Hub | MCO stack: Thanos Receive/Ruler/Store/Querier, AlertManager, `thanos-ruler-custom-rules` ConfigMap, `alertmanager-config` Secret, `observability-metrics-custom-allowlist` ConfigMap |
 | `<clusterName>` | Hub | `<clusterName>-admin-kubeconfig` Secret per spoke cluster |
 | `open-cluster-management-addon-observability` | Each spoke | MCO observability-addon and `metrics-collector` pods |
@@ -600,6 +640,10 @@ All AgenticRun config ConfigMaps (`telco-anomaly-host-network-config`, `telco-an
 
 The CRD manifest for `TelcoHealthcheck`. Regenerated via `make manifests`.
 
+### `config/crd/bases/ran.openshift.io_telcohealthcheckruns.yaml`
+
+The namespaced `TelcoHealthCheckRun` CRD, also regenerated via `make manifests`.
+
 ### `config/rbac/`
 
 | File | Resource |
@@ -615,6 +659,8 @@ The CRD manifest for `TelcoHealthcheck`. Regenerated via `make manifests`.
 | `telcohealthchecks` (ran.openshift.io) | get, list, watch, update, patch |
 | `telcohealthchecks/status` | get, update, patch |
 | `telcohealthchecks/finalizers` | update |
+| `telcohealthcheckruns` and `/status` | get, list, watch, create, update, patch, delete (status: get, update, patch) |
+| `cronjobs` (batch) | get, list, watch, create, update, patch, delete |
 | `managedclusters` (cluster.open-cluster-management.io) | get, list, watch |
 | `secrets` | get, list, watch, update, patch, create, delete |
 | `configmaps` | get, list, watch, create, update, patch, delete |

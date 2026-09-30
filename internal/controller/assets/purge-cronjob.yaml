@@ -1,0 +1,45 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: telco-healthcheck-purge
+  namespace: telco-healthcheck-system
+  labels:
+    app.kubernetes.io/managed-by: telco-anomaly-detection
+spec:
+  schedule: "0 * * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 1
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          serviceAccountName: telco-anomaly-operator
+          restartPolicy: OnFailure
+          securityContext:
+            runAsNonRoot: true
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: purge
+              image: registry.redhat.io/openshift4/ose-cli:latest
+              securityContext:
+                allowPrivilegeEscalation: false
+                capabilities:
+                  drop: ["ALL"]
+              command:
+                - /bin/bash
+                - -c
+                - |
+                  set -euo pipefail
+                  cutoff=$(($(date -u +%s) - PURGE_INTERVAL_SECONDS))
+                  oc get telcohealthcheckruns.ran.openshift.io -n telco-healthcheck-system \
+                    -o go-template='{{range .items}}{{.metadata.name}}{{" "}}{{.metadata.creationTimestamp}}{{"\n"}}{{end}}' \
+                    | while read -r name created; do
+                        if [[ -n "$name" && $(date -u -d "$created" +%s) -lt $cutoff ]]; then
+                          oc delete telcohealthcheckruns.ran.openshift.io "$name" -n telco-healthcheck-system
+                        fi
+                      done
+              env:
+                - name: PURGE_INTERVAL_SECONDS
+                  value: ""

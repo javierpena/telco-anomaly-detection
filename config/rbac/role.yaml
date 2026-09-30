@@ -45,6 +45,18 @@ rules:
   - update
   - watch
 - apiGroups:
+  - batch
+  resources:
+  - cronjobs
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
   - cluster.open-cluster-management.io
   resources:
   - managedclusters
@@ -67,6 +79,27 @@ rules:
 - apiGroups:
   - ran.openshift.io
   resources:
+  - telcohealthcheckruns
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - ran.openshift.io
+  resources:
+  - telcohealthcheckruns/status
+  - telcohealthchecks/status
+  verbs:
+  - get
+  - patch
+  - update
+- apiGroups:
+  - ran.openshift.io
+  resources:
   - telcohealthchecks
   verbs:
   - get
@@ -79,14 +112,6 @@ rules:
   resources:
   - telcohealthchecks/finalizers
   verbs:
-  - update
-- apiGroups:
-  - ran.openshift.io
-  resources:
-  - telcohealthchecks/status
-  verbs:
-  - get
-  - patch
   - update
 - apiGroups:
   - rbac.authorization.k8s.io

@@ -145,6 +145,11 @@ spec:
                 required:
                 - period
                 type: object
+              purgeInterval:
+                description: |-
+                  PurgeInterval is the maximum age of hub-side run records. When omitted,
+                  no purge CronJob is created.
+                type: string
             required:
             - alerts
             - managedClusters

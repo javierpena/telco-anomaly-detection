@@ -1,5 +1,12 @@
 # TelcoHealthCheckRun CRD
 
+> **Implemented.** `docs/architecture.md` describes the running design. Key
+> refinements from this original proposal: persist a pending hub record before
+> spoke creation and recover it by run name; derive `phase` from the latest
+> `AnalysisResult.status.conditions[*].reason` (the CRD has no phase or summary
+> fields); keep a reconnecting list/watch per spoke instead of ending it after
+> one result; use the existing `telco-anomaly-operator` ServiceAccount for purge.
+
 ## Background
 
 The operator creates `AgenticRun` resources on spoke clusters but leaves no audit trail on the hub. `TelcoHealthCheckRun` fills this gap — a hub-side record that captures every AgenticRun creation event and actively tracks its outcome by monitoring the corresponding `AnalysisResult` resource on the spoke cluster. It is purely observational (empty spec, status-only) and is garbage-collected when the `TelcoHealthcheck` singleton is deleted.

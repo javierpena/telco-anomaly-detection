@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	uberzap "go.uber.org/zap"
@@ -21,6 +22,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
 	ranv1alpha1 "github.com/javierpena/telco-anomaly-detection/api/v1alpha1"
+	"github.com/javierpena/telco-anomaly-detection/internal/healthcheckrun"
 )
 
 const telcoHealthcheckFinalizer = "ran.openshift.io/telcohealthcheck-finalizer"
@@ -34,6 +36,9 @@ const telcoHealthcheckFinalizer = "ran.openshift.io/telcohealthcheck-finalizer"
 // +kubebuilder:rbac:groups=coordination.k8s.io,resources=leases,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 // +kubebuilder:rbac:groups=admissionregistration.k8s.io,resources=validatingwebhookconfigurations,verbs=get
+// +kubebuilder:rbac:groups=ran.openshift.io,resources=telcohealthcheckruns,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=ran.openshift.io,resources=telcohealthcheckruns/status,verbs=get;update;patch
+// +kubebuilder:rbac:groups=batch,resources=cronjobs,verbs=get;list;watch;create;update;patch;delete
 
 // TelcoHealthcheckReconciler reconciles TelcoHealthcheck objects.
 // It drives alert rule management, AlertManager webhook configuration, and periodic
@@ -45,7 +50,8 @@ type TelcoHealthcheckReconciler struct {
 	AlertReceiverSvcURL string
 	// LogLevel, when non-nil, is updated on each reconcile to reflect the most
 	// verbose logLevel across all TelcoHealthcheck CRs.
-	LogLevel *uberzap.AtomicLevel
+	LogLevel     *uberzap.AtomicLevel
+	SpokeWatches *SpokeWatchManager
 }
 
 // Reconcile is the main reconciliation loop. It is called when a TelcoHealthcheck object
@@ -61,11 +67,17 @@ func (r *TelcoHealthcheckReconciler) Reconcile(ctx context.Context, req ctrl.Req
 
 	thc := &ranv1alpha1.TelcoHealthcheck{}
 	if err := r.Get(ctx, req.NamespacedName, thc); err != nil {
+		if r.SpokeWatches != nil {
+			r.SpokeWatches.Stop()
+		}
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
 	// Deletion path: DeletionTimestamp is set, run cleanup then remove finalizer.
 	if !thc.DeletionTimestamp.IsZero() {
+		if r.SpokeWatches != nil {
+			r.SpokeWatches.Stop()
+		}
 		return r.handleDeletion(ctx, thc)
 	}
 
@@ -88,6 +100,21 @@ func (r *TelcoHealthcheckReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		}
 		r.LogLevel.SetLevel(level)
 	}
+	// Status tracking and recovery must continue even if reconciliation of an
+	// unrelated managed resource fails later in this pass.
+	monitoredClusters, err := getMonitoredClusters(ctx, r.Client, thc.Spec.ManagedClusters)
+	if err != nil {
+		logger.Error(err, "failed to resolve monitored clusters")
+		return ctrl.Result{}, fmt.Errorf("resolving monitored clusters: %w", err)
+	}
+	thc.Status.MonitoredClusters = monitoredClusters
+	if r.SpokeWatches != nil {
+		r.SpokeWatches.Sync(ctx, monitoredClusters)
+	}
+	pendingRuns, err := recoverPendingRuns(ctx, r.Client, r.OperatorNamespace)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
 
 	// Reconcile system-alert ConfigMaps from embedded assets (create/update when enabled, delete when disabled).
 	// Must run before reconcileAlertRules so the rule listing sees up-to-date system ConfigMaps.
@@ -108,14 +135,10 @@ func (r *TelcoHealthcheckReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		logger.Error(err, "failed to reconcile kube-compare-mcp")
 		return ctrl.Result{}, err
 	}
-
-	// Resolve monitored clusters.
-	monitoredClusters, err := getMonitoredClusters(ctx, r.Client, thc.Spec.ManagedClusters)
-	if err != nil {
-		logger.Error(err, "failed to resolve monitored clusters")
-		return ctrl.Result{}, fmt.Errorf("resolving monitored clusters: %w", err)
+	if err := reconcilePurgeCronJob(ctx, r.Client, r.OperatorNamespace, thc); err != nil {
+		logger.Error(err, "failed to reconcile purge CronJob")
+		return ctrl.Result{}, err
 	}
-	thc.Status.MonitoredClusters = monitoredClusters
 
 	// Reconcile Thanos alert rules (lists system and user ConfigMaps internally).
 	if err := reconcileAlertRules(ctx, r.Client, r.OperatorNamespace, thc.Spec.Alerts.UserAlerts); err != nil {
@@ -140,6 +163,14 @@ func (r *TelcoHealthcheckReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	requeueAfter, err := r.runPeriodicChecks(ctx, thc, monitoredClusters)
 	if err != nil {
 		logger.Error(err, "error during periodic check scheduling")
+	}
+	if pendingRuns && (requeueAfter == 0 || requeueAfter > time.Minute) {
+		requeueAfter = time.Minute
+	}
+	// The manager runnable and controller may start concurrently. If the
+	// runnable has not received its lifecycle context yet, retry the sync.
+	if r.SpokeWatches != nil && !r.SpokeWatches.Ready() && (requeueAfter == 0 || requeueAfter > 5*time.Second) {
+		requeueAfter = 5 * time.Second
 	}
 
 	// Persist status changes.
@@ -216,6 +247,12 @@ func (r *TelcoHealthcheckReconciler) cleanupResources(
 			firstErr = err
 		}
 	}
+	if err := cleanupPurgeCronJob(ctx, r.Client, r.OperatorNamespace); err != nil {
+		logger.Error(err, "failed to cleanup purge CronJob")
+		if firstErr == nil {
+			firstErr = err
+		}
+	}
 	return firstErr
 }
 
@@ -288,6 +325,10 @@ func (r *TelcoHealthcheckReconciler) alertReceiverURL() string {
 // SetupWithManager registers the controller with the manager and sets up watches on
 // TelcoHealthcheck resources, ManagedCluster resources, and user-alert ConfigMaps.
 func (r *TelcoHealthcheckReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	r.SpokeWatches = newSpokeWatchManager(mgr.GetClient(), mgr.GetAPIReader(), r.OperatorNamespace)
+	if err := mgr.Add(r.SpokeWatches); err != nil {
+		return err
+	}
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&ranv1alpha1.TelcoHealthcheck{}).
 		Watches(
@@ -298,6 +339,21 @@ func (r *TelcoHealthcheckReconciler) SetupWithManager(mgr ctrl.Manager) error {
 			&corev1.ConfigMap{},
 			handler.EnqueueRequestsFromMapFunc(r.mapUserAlertCMToTHC),
 			builder.WithPredicates(predicate.NewPredicateFuncs(isUserAlertConfigMap)),
+		).
+		Watches(
+			&corev1.Secret{},
+			handler.EnqueueRequestsFromMapFunc(r.mapManagedClusterToTelcoHealthchecks),
+			builder.WithPredicates(predicate.NewPredicateFuncs(func(obj client.Object) bool {
+				return strings.TrimSuffix(obj.GetName(), "-admin-kubeconfig") == obj.GetNamespace() &&
+					strings.HasSuffix(obj.GetName(), "-admin-kubeconfig")
+			})),
+		).
+		Watches(
+			&ranv1alpha1.TelcoHealthCheckRun{},
+			handler.EnqueueRequestsFromMapFunc(r.mapManagedClusterToTelcoHealthchecks),
+			builder.WithPredicates(predicate.NewPredicateFuncs(func(obj client.Object) bool {
+				return obj.GetAnnotations()[healthcheckrun.PendingAnnotation] == "true"
+			})),
 		).
 		Complete(r)
 }

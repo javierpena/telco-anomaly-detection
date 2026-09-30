@@ -78,6 +78,10 @@ type TelcoHealthcheckSpec struct {
 	// +optional
 	// +kubebuilder:default=info
 	LogLevel LogLevel `json:"logLevel,omitempty"`
+	// PurgeInterval is the maximum age of hub-side run records. When omitted,
+	// no purge CronJob is created.
+	// +optional
+	PurgeInterval *metav1.Duration `json:"purgeInterval,omitempty"`
 }
 
 // TelcoHealthcheckStatus defines the observed state of TelcoHealthcheck.

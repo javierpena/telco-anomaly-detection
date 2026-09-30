@@ -16,6 +16,7 @@ import (
 
 	ranv1alpha1 "github.com/javierpena/telco-anomaly-detection/api/v1alpha1"
 	"github.com/javierpena/telco-anomaly-detection/internal/agenticrun"
+	"github.com/javierpena/telco-anomaly-detection/internal/healthcheckrun"
 )
 
 func newHandlerScheme(t *testing.T) *runtime.Scheme {
@@ -35,7 +36,7 @@ func newHandlerScheme(t *testing.T) *runtime.Scheme {
 
 func makeTHCWithMonitoredClusters(clusters []string) *ranv1alpha1.TelcoHealthcheck {
 	thc := &ranv1alpha1.TelcoHealthcheck{
-		ObjectMeta: metav1.ObjectMeta{Name: ranv1alpha1.TelcoHealthcheckCanonicalName},
+		ObjectMeta: metav1.ObjectMeta{Name: ranv1alpha1.TelcoHealthcheckCanonicalName, UID: "test-owner-uid"},
 	}
 	thc.Status.MonitoredClusters = clusters
 	return thc
@@ -158,7 +159,7 @@ func TestProcessAlerts_MatchCreatesAgenticRun(t *testing.T) {
 	configCM := makeSystemAlertConfigMap("telco-anomaly-host-network-config", operatorNamespace, alertName, "check host network")
 
 	hubClient := fake.NewClientBuilder().WithScheme(scheme).
-		WithStatusSubresource(thc).
+		WithStatusSubresource(thc, &ranv1alpha1.TelcoHealthCheckRun{}).
 		WithObjects(thc, kubeSecret, alertCM, configCM).
 		Build()
 
@@ -194,6 +195,19 @@ func TestProcessAlerts_MatchCreatesAgenticRun(t *testing.T) {
 	if len(runList.Items) == 0 {
 		t.Error("expected at least one AgenticRun to be created")
 	}
+	var records ranv1alpha1.TelcoHealthCheckRunList
+	if err := hubClient.List(context.Background(), &records, client.InNamespace(operatorNamespace)); err != nil {
+		t.Fatal(err)
+	}
+	if len(records.Items) != 1 {
+		t.Fatalf("expected one alert record, got %d", len(records.Items))
+	}
+	record := records.Items[0]
+	if record.Name != record.Status.AgenticRunName || record.Status.ClusterName != "cluster-a" ||
+		record.Status.Trigger != alertName || record.Status.TriggeredBy != ranv1alpha1.TriggerTypeAlert ||
+		record.Annotations[healthcheckrun.PendingAnnotation] != "" || len(record.OwnerReferences) != 1 || record.OwnerReferences[0].UID != thc.UID {
+		t.Errorf("incorrect alert record: %+v", record)
+	}
 }
 
 func TestProcessAlerts_NonFiringAlertSkipped(t *testing.T) {
@@ -207,7 +221,7 @@ func TestProcessAlerts_NonFiringAlertSkipped(t *testing.T) {
 	configCM := makeAgenticRunConfigMapUnstructured("telco-anomaly-host-network-config", operatorNamespace)
 
 	hubClient := fake.NewClientBuilder().WithScheme(scheme).
-		WithStatusSubresource(thc).
+		WithStatusSubresource(thc, &ranv1alpha1.TelcoHealthCheckRun{}).
 		WithObjects(thc, kubeSecret, alertCM, configCM).
 		Build()
 
@@ -245,7 +259,7 @@ func TestProcessAlerts_UnmonitoredClusterSkipped(t *testing.T) {
 	thc := makeTHCWithMonitoredClusters([]string{"cluster-a"})
 	alertCM := makeAlertNamesConfigMap([]string{"TargetAlert"})
 	hubClient := fake.NewClientBuilder().WithScheme(scheme).
-		WithStatusSubresource(thc).
+		WithStatusSubresource(thc, &ranv1alpha1.TelcoHealthCheckRun{}).
 		WithObjects(thc, alertCM).
 		Build()
 
@@ -281,7 +295,7 @@ func TestProcessAlerts_UndefinedAlertSkipped(t *testing.T) {
 	kubeSecret := makeKubeconfigSecretUnstructured("cluster-a")
 	alertCM := makeAlertNamesConfigMap([]string{"DefinedAlert"})
 	hubClient := fake.NewClientBuilder().WithScheme(scheme).
-		WithStatusSubresource(thc).
+		WithStatusSubresource(thc, &ranv1alpha1.TelcoHealthCheckRun{}).
 		WithObjects(thc, kubeSecret, alertCM).
 		Build()
 
@@ -324,7 +338,7 @@ func TestProcessAlerts_NodeNameExpandedInRequest(t *testing.T) {
 	)
 
 	hubClient := fake.NewClientBuilder().WithScheme(scheme).
-		WithStatusSubresource(thc).
+		WithStatusSubresource(thc, &ranv1alpha1.TelcoHealthCheckRun{}).
 		WithObjects(thc, kubeSecret, alertCM, configCM).
 		Build()
 

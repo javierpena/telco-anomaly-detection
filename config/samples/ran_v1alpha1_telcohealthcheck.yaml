@@ -29,3 +29,6 @@ spec:
     rdsCompliance:
       enabled: false
       # period: 24h  # uncomment to override the default period for RDS checks
+
+  # Keep hub-side run records for 7 days; omit to retain them indefinitely.
+  # purgeInterval: 168h

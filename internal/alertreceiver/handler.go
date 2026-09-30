@@ -24,6 +24,7 @@ import (
 
 	ranv1alpha1 "github.com/javierpena/telco-anomaly-detection/api/v1alpha1"
 	"github.com/javierpena/telco-anomaly-detection/internal/agenticrun"
+	"github.com/javierpena/telco-anomaly-detection/internal/healthcheckrun"
 )
 
 const (
@@ -390,9 +391,20 @@ func (h *Handler) createAgenticRunOnCluster(ctx context.Context, kubeconfig []by
 	if err != nil {
 		return fmt.Errorf("building AgenticRun object: %w", err)
 	}
+	owner := &ranv1alpha1.TelcoHealthcheck{}
+	if err := h.HubClient.Get(ctx, client.ObjectKey{Name: ranv1alpha1.TelcoHealthcheckCanonicalName}, owner); err != nil {
+		return fmt.Errorf("fetching singleton for audit record before spoke creation: %w", err)
+	}
+	if _, err := healthcheckrun.Begin(ctx, h.HubClient, operatorNamespace, runName, runName,
+		clusterName, ranv1alpha1.TriggerTypeAlert, alertName, owner); err != nil {
+		return err
+	}
 
 	if err := spokeClient.Create(ctx, u); err != nil {
-		return fmt.Errorf("creating AgenticRun %s on cluster %s: %w", runName, clusterName, err)
+		return fmt.Errorf("creating AgenticRun %s on cluster %s (pending record retained for recovery): %w", runName, clusterName, err)
+	}
+	if err := healthcheckrun.Confirm(ctx, h.HubClient, operatorNamespace, runName); err != nil {
+		logger.Error(err, "failed to confirm hub record; controller will retry", "cluster", clusterName, "name", runName)
 	}
 
 	logger.Info("created AgenticRun for alert",

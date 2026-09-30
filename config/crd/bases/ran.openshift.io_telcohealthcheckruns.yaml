@@ -1,0 +1,103 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.21.0
+  name: telcohealthcheckruns.ran.openshift.io
+spec:
+  group: ran.openshift.io
+  names:
+    kind: TelcoHealthCheckRun
+    listKind: TelcoHealthCheckRunList
+    plural: telcohealthcheckruns
+    shortNames:
+    - thcr
+    singular: telcohealthcheckrun
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .status.clusterName
+      name: Cluster
+      type: string
+    - jsonPath: .status.triggeredBy
+      name: Triggered By
+      type: string
+    - jsonPath: .status.trigger
+      name: Trigger
+      type: string
+    - jsonPath: .status.agenticRunName
+      name: AgenticRun
+      type: string
+    - jsonPath: .status.agenticRunStatus.phase
+      name: Phase
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: TelcoHealthCheckRun is a hub-side audit record of a spoke AgenticRun.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: TelcoHealthCheckRunSpec is empty; this record is managed
+              by the operator.
+            type: object
+          status:
+            description: TelcoHealthCheckRunStatus identifies the spoke run and records
+              its observed result.
+            properties:
+              agenticRunName:
+                type: string
+              agenticRunStatus:
+                description: AgenticRunStatus contains the latest observed AnalysisResult
+                  condition and conclusion.
+                properties:
+                  phase:
+                    description: Phase is the reason of the AnalysisResult condition
+                      with the latest lastTransitionTime.
+                    type: string
+                  summary:
+                    description: Summary is taken from the result diagnosis, an option,
+                      or its failure reason.
+                    type: string
+                type: object
+              clusterName:
+                type: string
+              trigger:
+                type: string
+              triggeredBy:
+                description: TriggerType identifies what started a run.
+                enum:
+                - alert
+                - periodicHealthCheck
+                type: string
+            required:
+            - agenticRunName
+            - clusterName
+            - trigger
+            - triggeredBy
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

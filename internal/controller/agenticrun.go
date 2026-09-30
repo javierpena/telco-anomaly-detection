@@ -12,6 +12,7 @@ import (
 
 	ranv1alpha1 "github.com/javierpena/telco-anomaly-detection/api/v1alpha1"
 	"github.com/javierpena/telco-anomaly-detection/internal/agenticrun"
+	"github.com/javierpena/telco-anomaly-detection/internal/healthcheckrun"
 )
 
 const (
@@ -83,9 +84,18 @@ func createAgenticRunsForClusters(
 			logger.Error(err, "failed to build AgenticRun object, skipping cluster", "cluster", clusterName)
 			continue
 		}
-		if err := spokeClient.Create(ctx, run); err != nil {
-			logger.Error(err, "failed to create AgenticRun", "cluster", clusterName, "name", runName)
+		recordName := healthcheckrun.Name(runName, clusterName, true)
+		if _, err := healthcheckrun.Begin(ctx, c, operatorNamespace, recordName, runName,
+			clusterName, ranv1alpha1.TriggerTypePeriodicHealthCheck, checkType, thc); err != nil {
+			logger.Error(err, "failed to persist run identity, skipping spoke creation", "cluster", clusterName)
 			continue
+		}
+		if err := spokeClient.Create(ctx, run); err != nil {
+			logger.Error(err, "failed to create AgenticRun; pending record will be checked", "cluster", clusterName, "name", runName)
+			continue
+		}
+		if err := healthcheckrun.Confirm(ctx, c, operatorNamespace, recordName); err != nil {
+			logger.Error(err, "failed to confirm hub record; controller will retry", "cluster", clusterName, "name", runName)
 		}
 
 		logger.Info("created AgenticRun", "cluster", clusterName, "name", runName, "namespace", agenticrun.Namespace)
