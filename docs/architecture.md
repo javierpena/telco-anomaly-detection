@@ -240,10 +240,11 @@ controller-runtime metrics:
 | `telco_healthcheck_runs` | Number of hub-side `TelcoHealthCheckRun` records in the configured operator namespace. |
 | `telco_healthcheck_runs_action_required` | Number of those records with `status.agenticRunActionRequired` exactly `"True"`. |
 | `telco_healthcheck_runs_by_phase{phase="..."}` | Number of those records for each current `status.agenticRunStatus.phase`. Missing or empty phases use `"Unknown"`. |
+| `telco_healthcheck_runs_by_type{type="..."}` | Number of those records for each current `status.agenticRunStatus.type` (the latest AgenticRun condition type). Missing or empty types use `"Unknown"`. |
 
 The collector reads the hub API on each scrape, so run deletion, status
 changes, and purges affect the next successful scrape. It emits only phases
-present in the current records, with no per-cluster or per-run labels. A
+and types present in the current records, with no per-cluster or per-run labels. A
 missing singleton reports zero managed clusters; other API read failures fail
 the scrape rather than exposing partial or misleading values. Run counts
 include all records in the operator namespace, even for clusters that are no

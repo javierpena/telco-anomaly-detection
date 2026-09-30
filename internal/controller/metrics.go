@@ -16,7 +16,7 @@ import (
 const metricsReadTimeout = 5 * time.Second
 
 // MetricsCollector reports the current state of hub-side health checks.
-// Each scrape reads the API so removed phases do not leave stale series behind.
+// Each scrape reads the API so removed phases and types do not leave stale series behind.
 type MetricsCollector struct {
 	reader    client.Reader
 	namespace string
@@ -24,6 +24,7 @@ type MetricsCollector struct {
 	runs      *prometheus.Desc
 	action    *prometheus.Desc
 	phase     *prometheus.Desc
+	runType   *prometheus.Desc
 }
 
 func NewMetricsCollector(reader client.Reader, namespace string) *MetricsCollector {
@@ -38,6 +39,8 @@ func NewMetricsCollector(reader client.Reader, namespace string) *MetricsCollect
 			"Number of hub-side TelcoHealthCheckRun records requiring action.", nil, nil),
 		phase: prometheus.NewDesc("telco_healthcheck_runs_by_phase",
 			"Number of hub-side TelcoHealthCheckRun records by current phase.", []string{"phase"}, nil),
+		runType: prometheus.NewDesc("telco_healthcheck_runs_by_type",
+			"Number of hub-side TelcoHealthCheckRun records by current AgenticRun condition type.", []string{"type"}, nil),
 	}
 }
 
@@ -46,6 +49,7 @@ func (c *MetricsCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.runs
 	ch <- c.action
 	ch <- c.phase
+	ch <- c.runType
 }
 
 func (c *MetricsCollector) Collect(ch chan<- prometheus.Metric) {
@@ -70,16 +74,24 @@ func (c *MetricsCollector) Collect(ch chan<- prometheus.Metric) {
 	}
 
 	phaseCounts := make(map[string]int)
+	typeCounts := make(map[string]int)
 	actionRequired := 0
 	for _, record := range records.Items {
 		if record.Status.AgenticRunActionRequired == "True" {
 			actionRequired++
 		}
 		phase := "Unknown"
-		if record.Status.AgenticRunStatus != nil && record.Status.AgenticRunStatus.Phase != "" {
-			phase = record.Status.AgenticRunStatus.Phase
+		runType := "Unknown"
+		if status := record.Status.AgenticRunStatus; status != nil {
+			if status.Phase != "" {
+				phase = status.Phase
+			}
+			if status.Type != "" {
+				runType = status.Type
+			}
 		}
 		phaseCounts[phase]++
+		typeCounts[runType]++
 	}
 
 	ch <- prometheus.MustNewConstMetric(c.clusters, prometheus.GaugeValue, float64(clusterCount))
@@ -87,5 +99,8 @@ func (c *MetricsCollector) Collect(ch chan<- prometheus.Metric) {
 	ch <- prometheus.MustNewConstMetric(c.action, prometheus.GaugeValue, float64(actionRequired))
 	for phase, count := range phaseCounts {
 		ch <- prometheus.MustNewConstMetric(c.phase, prometheus.GaugeValue, float64(count), phase)
+	}
+	for runType, count := range typeCounts {
+		ch <- prometheus.MustNewConstMetric(c.runType, prometheus.GaugeValue, float64(count), runType)
 	}
 }

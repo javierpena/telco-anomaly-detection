@@ -38,30 +38,30 @@ func TestMetricsCollectorCurrentRecords(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: ranv1alpha1.TelcoHealthcheckCanonicalName},
 		Status:     ranv1alpha1.TelcoHealthcheckStatus{MonitoredClusters: []string{"one", "two"}},
 	}
-	makeRun := func(name, namespace, phase, action string) *ranv1alpha1.TelcoHealthCheckRun {
+	makeRun := func(name, namespace, phase, runType, action string) *ranv1alpha1.TelcoHealthCheckRun {
 		run := &ranv1alpha1.TelcoHealthCheckRun{
 			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
 			Status:     ranv1alpha1.TelcoHealthCheckRunStatus{AgenticRunActionRequired: action},
 		}
-		if phase != "" {
-			run.Status.AgenticRunStatus = &ranv1alpha1.AgenticRunStatus{Phase: phase}
+		if phase != "" || runType != "" {
+			run.Status.AgenticRunStatus = &ranv1alpha1.AgenticRunStatus{Phase: phase, Type: runType}
 		}
 		return run
 	}
 	c := fake.NewClientBuilder().WithScheme(newTestScheme(t)).
 		WithStatusSubresource(thc, &ranv1alpha1.TelcoHealthCheckRun{}).
 		WithObjects(thc,
-			makeRun("pending", "operator", "Pending", ""),
-			makeRun("pending-action", "operator", "Pending", "True"),
-			makeRun("healthy", "operator", "NoActionRequired", "False"),
-			makeRun("unknown", "operator", "", "True"),
+			makeRun("pending", "operator", "Pending", "Progressing", ""),
+			makeRun("pending-action", "operator", "Pending", "Progressing", "True"),
+			makeRun("healthy", "operator", "NoActionRequired", "Complete", "False"),
+			makeRun("unknown", "operator", "", "", "True"),
 			&ranv1alpha1.TelcoHealthCheckRun{
 				ObjectMeta: metav1.ObjectMeta{Name: "empty-phase", Namespace: "operator"},
 				Status: ranv1alpha1.TelcoHealthCheckRunStatus{
 					AgenticRunStatus: &ranv1alpha1.AgenticRunStatus{},
 				},
 			},
-			makeRun("elsewhere", "other", "Failed", "True"),
+			makeRun("elsewhere", "other", "Failed", "Error", "True"),
 		).Build()
 	registry := prometheus.NewRegistry()
 	if err := registry.Register(NewMetricsCollector(c, "operator")); err != nil {
@@ -74,6 +74,9 @@ func TestMetricsCollectorCurrentRecords(t *testing.T) {
 		"telco_healthcheck_runs_by_phase{phase=Pending}":          2,
 		"telco_healthcheck_runs_by_phase{phase=NoActionRequired}": 1,
 		"telco_healthcheck_runs_by_phase{phase=Unknown}":          2,
+		"telco_healthcheck_runs_by_type{type=Progressing}":        2,
+		"telco_healthcheck_runs_by_type{type=Complete}":           1,
+		"telco_healthcheck_runs_by_type{type=Unknown}":            2,
 	}
 	if got := metricSamples(t, registry); !reflect.DeepEqual(got, want) {
 		t.Errorf("initial metrics = %v, want %v", got, want)
@@ -85,9 +88,10 @@ func TestMetricsCollectorCurrentRecords(t *testing.T) {
 		t.Fatal(err)
 	}
 	delete(want, "telco_healthcheck_runs_by_phase{phase=NoActionRequired}")
+	delete(want, "telco_healthcheck_runs_by_type{type=Complete}")
 	want["telco_healthcheck_runs"] = 4
 	if got := metricSamples(t, registry); !reflect.DeepEqual(got, want) {
-		t.Errorf("metrics after deleting last record in phase = %v, want %v", got, want)
+		t.Errorf("metrics after deleting last record in phase and type = %v, want %v", got, want)
 	}
 }
 
