@@ -365,6 +365,10 @@ records append the cluster name because one run name is reused across spokes.
 Records carry the singleton owner reference and a hashed run/cluster label
 for correlation.
 
+`oc get thcr -n telco-healthcheck-system` displays Action Required alongside
+the cluster, trigger, AgenticRun, and phase. It shows `<none>` until the
+AnalysisResult supplies a value.
+
 The controller maintains one list/watch of `analysisresults.agentic.openshift.io`
 in `openshift-lightspeed` per monitored spoke. The list establishes a watch
 resourceVersion and replays existing results after disconnects. The watch

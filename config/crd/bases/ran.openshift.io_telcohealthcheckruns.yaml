@@ -32,6 +32,9 @@ spec:
     - jsonPath: .status.agenticRunStatus.phase
       name: Phase
       type: string
+    - jsonPath: .status.agenticRunActionRequired
+      name: Action Required
+      type: string
     - jsonPath: .metadata.creationTimestamp
       name: Age
       type: date

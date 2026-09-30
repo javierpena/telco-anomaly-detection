@@ -49,6 +49,7 @@ type TelcoHealthCheckRunStatus struct {
 // +kubebuilder:printcolumn:name="Trigger",type=string,JSONPath=`.status.trigger`
 // +kubebuilder:printcolumn:name="AgenticRun",type=string,JSONPath=`.status.agenticRunName`
 // +kubebuilder:printcolumn:name="Phase",type=string,JSONPath=`.status.agenticRunStatus.phase`
+// +kubebuilder:printcolumn:name="Action Required",type=string,JSONPath=`.status.agenticRunActionRequired`
 // +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
 // TelcoHealthCheckRun is a hub-side audit record of a spoke AgenticRun.
 type TelcoHealthCheckRun struct {
