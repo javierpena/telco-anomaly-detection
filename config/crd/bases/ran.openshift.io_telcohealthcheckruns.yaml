@@ -29,6 +29,9 @@ spec:
     - jsonPath: .status.agenticRunName
       name: AgenticRun
       type: string
+    - jsonPath: .status.agenticRunStatus.type
+      name: Type
+      type: string
     - jsonPath: .status.agenticRunStatus.phase
       name: Phase
       type: string
@@ -80,8 +83,8 @@ spec:
                 type: string
               agenticRunStatus:
                 description: |-
-                  AgenticRunStatus tracks spoke creation, then the AgenticRun's latest
-                  condition reason and the AnalysisResult conclusion.
+                  AgenticRunStatus tracks spoke creation, then the latest AgenticRun condition
+                  type and reason, and the AnalysisResult conclusion.
                 properties:
                   phase:
                     description: |-
@@ -91,6 +94,9 @@ spec:
                   summary:
                     description: Summary is taken from the result diagnosis, an option,
                       or its failure reason.
+                    type: string
+                  type:
+                    description: Type is taken from the latest AgenticRun condition.
                     type: string
                 type: object
               clusterName:

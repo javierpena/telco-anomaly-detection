@@ -11,9 +11,12 @@ const (
 	TriggerTypePeriodicHealthCheck TriggerType = "periodicHealthCheck"
 )
 
-// AgenticRunStatus tracks spoke creation, then the AgenticRun's latest
-// condition reason and the AnalysisResult conclusion.
+// AgenticRunStatus tracks spoke creation, then the latest AgenticRun condition
+// type and reason, and the AnalysisResult conclusion.
 type AgenticRunStatus struct {
+	// Type is taken from the latest AgenticRun condition.
+	// +optional
+	Type string `json:"type,omitempty"`
 	// Phase is Pending during spoke creation, Created or Failed once its outcome
 	// is known, then the reason of the latest AgenticRun condition.
 	// +optional
@@ -48,6 +51,7 @@ type TelcoHealthCheckRunStatus struct {
 // +kubebuilder:printcolumn:name="Triggered By",type=string,JSONPath=`.status.triggeredBy`
 // +kubebuilder:printcolumn:name="Trigger",type=string,JSONPath=`.status.trigger`
 // +kubebuilder:printcolumn:name="AgenticRun",type=string,JSONPath=`.status.agenticRunName`
+// +kubebuilder:printcolumn:name="Type",type=string,JSONPath=`.status.agenticRunStatus.type`
 // +kubebuilder:printcolumn:name="Phase",type=string,JSONPath=`.status.agenticRunStatus.phase`
 // +kubebuilder:printcolumn:name="Action Required",type=string,JSONPath=`.status.agenticRunActionRequired`
 // +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"

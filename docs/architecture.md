@@ -357,7 +357,7 @@ if it does not. It never creates a second spoke run. Both binaries use
 `ran.openshift.io/v1alpha1` `TelcoHealthCheckRun` (`thcr`) is namespaced in
 `telco-healthcheck-system`. Its spec is empty. Status contains `clusterName`,
 `agenticRunName`, `triggeredBy` (`alert` or `periodicHealthCheck`), `trigger`,
-`agenticRunStatus.{phase,summary}`, and optional `agenticRunActionRequired`.
+`agenticRunStatus.{type,phase,summary}`, and optional `agenticRunActionRequired`.
 The latter mirrors `AnalysisResult.status.actionRequired` (`"True"` or
 `"False"`) and is omitted until Lightspeed provides a value. The record
 timestamp gives its age. Alert records use the spoke run name; periodic
@@ -365,9 +365,11 @@ records append the cluster name because one run name is reused across spokes.
 Records carry the singleton owner reference and a hashed run/cluster label
 for correlation.
 
-`oc get thcr -n telco-healthcheck-system` displays Action Required alongside
-the cluster, trigger, AgenticRun, and phase. It shows `<none>` until the
-AnalysisResult supplies a value.
+`oc get thcr -n telco-healthcheck-system` displays Type immediately before
+Phase, followed by Action Required alongside the cluster, trigger, and
+AgenticRun. Type and Phase are populated from the type and reason of the same
+latest AgenticRun condition. Type shows `<none>` until a condition is observed;
+Action Required shows `<none>` until the AnalysisResult supplies a value.
 
 The controller maintains separate list/watches of `agenticruns.agentic.openshift.io`
 and `analysisresults.agentic.openshift.io` in `openshift-lightspeed` per monitored
@@ -376,13 +378,14 @@ objects after disconnects. The watches reconnect on failure and continue after
 individual runs complete. They stop on cluster removal, singleton deletion,
 or shutdown. The AgenticRun name and the AnalysisResult's
 `.spec.agenticRunName` identify the corresponding hub run. The hub `phase` is
-the verbatim `reason` of the AgenticRun condition with the latest valid
-`lastTransitionTime`, not the `status.phase` lifecycle field. Until such a
-condition is available it retains the creation phase. AnalysisResult updates
-do not change the phase: `summary` comes from the top-level diagnosis, first
-option diagnosis/summary, or failure reason; `agenticRunActionRequired` comes
-from `status.actionRequired`. Removing a cluster leaves its historical records
-with their last observed status.
+the verbatim `reason`, and `type` is the verbatim `type`, of the AgenticRun
+condition with the latest valid `lastTransitionTime`; phase is not taken from
+the `status.phase` lifecycle field. Until such a condition is available it
+retains the creation phase. AnalysisResult updates do not change type or phase:
+`summary` comes from the top-level diagnosis, first option diagnosis/summary,
+or failure reason; `agenticRunActionRequired` comes from `status.actionRequired`.
+Removing a cluster leaves its historical records with their last observed
+status.
 
 When `purgeInterval` is set, an hourly `batch/v1` CronJob uses the existing
 `telco-anomaly-operator` ServiceAccount to remove records past that age.

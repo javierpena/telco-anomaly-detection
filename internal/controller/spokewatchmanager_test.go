@@ -19,29 +19,30 @@ import (
 	"github.com/javierpena/telco-anomaly-detection/internal/healthcheckrun"
 )
 
-func TestLatestConditionReason(t *testing.T) {
+func TestLatestCondition(t *testing.T) {
 	for _, tt := range []struct {
-		name       string
-		conditions []interface{}
-		want       string
+		name                string
+		conditions          []interface{}
+		wantType, wantPhase string
 	}{
 		{"latest timestamp, not list order", []interface{}{
-			map[string]interface{}{"lastTransitionTime": "2026-01-02T11:00:00Z", "reason": "Succeeded"},
-			map[string]interface{}{"lastTransitionTime": "2026-01-02T10:00:00Z", "reason": "Running"},
-		}, "Succeeded"},
+			map[string]interface{}{"lastTransitionTime": "2026-01-02T11:00:00Z", "type": "Complete", "reason": "Succeeded"},
+			map[string]interface{}{"lastTransitionTime": "2026-01-02T10:00:00Z", "type": "Progressing", "reason": "Running"},
+		}, "Complete", "Succeeded"},
 		{"invalid timestamps", []interface{}{
-			map[string]interface{}{"lastTransitionTime": "invalid", "reason": "Failed"},
-			map[string]interface{}{"lastTransitionTime": "2026-01-02T11:00:00.123Z", "reason": "Completed"},
-			map[string]interface{}{"reason": "Pending"},
-		}, "Completed"},
-		{"no timestamp", []interface{}{map[string]interface{}{"reason": "Pending"}}, ""},
+			map[string]interface{}{"lastTransitionTime": "invalid", "type": "Failed", "reason": "Failure"},
+			map[string]interface{}{"lastTransitionTime": "2026-01-02T11:00:00.123Z", "type": "Complete", "reason": "Completed"},
+			map[string]interface{}{"type": "Pending", "reason": "Waiting"},
+		}, "Complete", "Completed"},
+		{"no timestamp", []interface{}{map[string]interface{}{"type": "Pending", "reason": "Waiting"}}, "", ""},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			run := &unstructured.Unstructured{Object: map[string]interface{}{
 				"status": map[string]interface{}{"conditions": tt.conditions},
 			}}
-			if got := latestConditionReason(run); got != tt.want {
-				t.Fatalf("latestConditionReason() = %q, want %q", got, tt.want)
+			gotType, gotPhase := latestCondition(run)
+			if gotType != tt.wantType || gotPhase != tt.wantPhase {
+				t.Fatalf("latestCondition() = (%q, %q), want (%q, %q)", gotType, gotPhase, tt.wantType, tt.wantPhase)
 			}
 		})
 	}
@@ -106,8 +107,8 @@ func TestHandleResultMatchesClusterAndRun(t *testing.T) {
 	runObject := &unstructured.Unstructured{Object: map[string]interface{}{
 		"metadata": map[string]interface{}{"name": run},
 		"status": map[string]interface{}{"conditions": []interface{}{
-			map[string]interface{}{"lastTransitionTime": "2026-01-02T11:00:00Z", "reason": "Succeeded"},
-			map[string]interface{}{"lastTransitionTime": "2026-01-02T10:00:00Z", "reason": "Running"},
+			map[string]interface{}{"lastTransitionTime": "2026-01-02T11:00:00Z", "type": "Complete", "reason": "Succeeded"},
+			map[string]interface{}{"lastTransitionTime": "2026-01-02T10:00:00Z", "type": "Progressing", "reason": "Running"},
 		}},
 	}}
 	m.handleRun(ctx, cluster, runObject)
@@ -115,23 +116,25 @@ func TestHandleResultMatchesClusterAndRun(t *testing.T) {
 	if err := hub.Get(ctx, client.ObjectKey{Namespace: operatorNamespace, Name: "match"}, updated); err != nil {
 		t.Fatal(err)
 	}
-	if updated.Status.AgenticRunActionRequired != "False" || updated.Status.AgenticRunStatus.Phase != "Succeeded" || updated.Status.AgenticRunStatus.Summary != "healthy" {
+	if updated.Status.AgenticRunActionRequired != "False" || updated.Status.AgenticRunStatus.Type != "Complete" ||
+		updated.Status.AgenticRunStatus.Phase != "Succeeded" || updated.Status.AgenticRunStatus.Summary != "healthy" {
 		t.Fatalf("independent status updates not reflected: %+v", updated.Status)
 	}
-	// An older or newer AnalysisResult condition cannot change the AgenticRun phase.
+	// An AnalysisResult update cannot change AgenticRun type or phase.
 	m.handleResult(ctx, cluster, result)
 	if err := hub.Get(ctx, client.ObjectKey{Namespace: operatorNamespace, Name: "match"}, updated); err != nil {
 		t.Fatal(err)
 	}
-	if updated.Status.AgenticRunStatus.Phase != "Succeeded" {
-		t.Fatalf("AnalysisResult overwrote run phase: %+v", updated.Status)
+	if updated.Status.AgenticRunStatus.Type != "Complete" || updated.Status.AgenticRunStatus.Phase != "Succeeded" {
+		t.Fatalf("AnalysisResult overwrote run condition: %+v", updated.Status.AgenticRunStatus)
 	}
 	runObject.Object["status"] = map[string]interface{}{"phase": "Running"}
 	m.handleRun(ctx, cluster, runObject)
 	if err := hub.Get(ctx, client.ObjectKey{Namespace: operatorNamespace, Name: "match"}, updated); err != nil {
 		t.Fatal(err)
 	}
-	if updated.Status.AgenticRunStatus.Phase != "Succeeded" || updated.Status.AgenticRunActionRequired != "False" {
+	if updated.Status.AgenticRunStatus.Type != "Complete" || updated.Status.AgenticRunStatus.Phase != "Succeeded" ||
+		updated.Status.AgenticRunActionRequired != "False" {
 		t.Fatalf("missing conditions changed existing status: %+v", updated.Status)
 	}
 	other := &ranv1alpha1.TelcoHealthCheckRun{}
@@ -209,7 +212,7 @@ current-context: spoke
 		"apiVersion": "agentic.openshift.io/v1alpha1", "kind": "AgenticRun",
 		"metadata": map[string]interface{}{"name": runName, "namespace": "openshift-lightspeed"},
 		"status": map[string]interface{}{"conditions": []interface{}{
-			map[string]interface{}{"lastTransitionTime": "2026-01-02T11:00:00Z", "reason": "Succeeded"},
+			map[string]interface{}{"lastTransitionTime": "2026-01-02T11:00:00Z", "type": "Complete", "reason": "Succeeded"},
 		}},
 	}}
 	resultObject := &unstructured.Unstructured{Object: map[string]interface{}{
@@ -256,13 +259,13 @@ current-context: spoke
 		if err := hub.Get(ctx, client.ObjectKeyFromObject(record), updated); err != nil {
 			t.Fatal(err)
 		}
-		if updated.Status.AgenticRunStatus.Phase == "Succeeded" &&
+		if updated.Status.AgenticRunStatus.Type == "Complete" && updated.Status.AgenticRunStatus.Phase == "Succeeded" &&
 			updated.Status.AgenticRunStatus.Summary == "healthy" && updated.Status.AgenticRunActionRequired == "False" {
 			break
 		}
 		select {
 		case <-deadline:
-			t.Fatalf("listed spoke objects not reflected: phase=%q summary=%q actionRequired=%q", updated.Status.AgenticRunStatus.Phase, updated.Status.AgenticRunStatus.Summary, updated.Status.AgenticRunActionRequired)
+			t.Fatalf("listed spoke objects not reflected: type=%q phase=%q summary=%q actionRequired=%q", updated.Status.AgenticRunStatus.Type, updated.Status.AgenticRunStatus.Phase, updated.Status.AgenticRunStatus.Summary, updated.Status.AgenticRunActionRequired)
 		case <-time.After(10 * time.Millisecond):
 		}
 	}

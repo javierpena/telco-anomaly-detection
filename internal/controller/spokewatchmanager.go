@@ -213,7 +213,7 @@ func (m *SpokeWatchManager) handleResult(ctx context.Context, cluster string, re
 }
 
 func (m *SpokeWatchManager) handleRun(ctx context.Context, cluster string, run *unstructured.Unstructured) {
-	phase := latestConditionReason(run)
+	conditionType, phase := latestCondition(run)
 	if phase == "" || run.GetName() == "" {
 		return
 	}
@@ -221,6 +221,7 @@ func (m *SpokeWatchManager) handleRun(ctx context.Context, cluster string, run *
 		if current.Status.AgenticRunStatus == nil {
 			current.Status.AgenticRunStatus = &ranv1alpha1.AgenticRunStatus{}
 		}
+		current.Status.AgenticRunStatus.Type = conditionType
 		current.Status.AgenticRunStatus.Phase = phase
 	})
 }
@@ -263,11 +264,12 @@ func (m *SpokeWatchManager) updateMatchingRecords(ctx context.Context, cluster, 
 	}
 }
 
-// latestConditionReason selects the reason of the most recently transitioned
+// latestCondition selects the type and reason of the most recently transitioned
 // condition, ignoring conditions without a valid timestamp.
-func latestConditionReason(object *unstructured.Unstructured) string {
+func latestCondition(object *unstructured.Unstructured) (string, string) {
 	conditions, _, _ := unstructured.NestedSlice(object.Object, "status", "conditions")
 	var newest time.Time
+	var conditionType string
 	var phase string
 	for _, item := range conditions {
 		condition, ok := item.(map[string]interface{})
@@ -281,10 +283,11 @@ func latestConditionReason(object *unstructured.Unstructured) string {
 		}
 		if !when.Before(newest) {
 			newest = when
+			conditionType, _ = condition["type"].(string)
 			phase, _ = condition["reason"].(string)
 		}
 	}
-	return phase
+	return conditionType, phase
 }
 
 // extractResultSummary maps the current Lightspeed AnalysisResult schema.
