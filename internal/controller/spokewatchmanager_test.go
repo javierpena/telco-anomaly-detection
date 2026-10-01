@@ -2,7 +2,6 @@ package controller
 
 import (
 	"context"
-	"fmt"
 	"testing"
 	"time"
 
@@ -13,7 +12,6 @@ import (
 	"k8s.io/client-go/dynamic"
 	dynamicfake "k8s.io/client-go/dynamic/fake"
 	"k8s.io/client-go/rest"
-	ktesting "k8s.io/client-go/testing"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
@@ -73,7 +71,7 @@ func TestHandleResultMatchesClusterAndRun(t *testing.T) {
 		return &ranv1alpha1.TelcoHealthCheckRun{ObjectMeta: metav1.ObjectMeta{
 			Name: name, Namespace: operatorNamespace, Labels: map[string]string{healthcheckrun.RunKeyLabel: healthcheckrun.Key(clusterName, run)},
 		}, Status: ranv1alpha1.TelcoHealthCheckRunStatus{ClusterName: clusterName, AgenticRunName: run,
-			AgenticRunStatus: &ranv1alpha1.AgenticRunStatus{Phase: healthcheckrun.PhaseCreated}}}
+			AgenticRunStatus: &ranv1alpha1.AgenticRunStatus{Type: "Analyzed", Phase: healthcheckrun.PhaseCreated}}}
 	}
 	hub := fake.NewClientBuilder().WithScheme(newTestScheme(t)).WithStatusSubresource(&ranv1alpha1.TelcoHealthCheckRun{}).
 		WithObjects(makeRecord("match", cluster), makeRecord("other", "cluster-b")).Build()
@@ -85,7 +83,7 @@ func TestHandleResultMatchesClusterAndRun(t *testing.T) {
 			map[string]interface{}{"lastTransitionTime": "2026-01-02T10:00:00Z", "reason": "Completed"},
 		}, "diagnosis": map[string]interface{}{"summary": "healthy"}},
 	}}
-	m.handleResult(ctx, cluster, dyn, result)
+	m.handleResult(ctx, cluster, result)
 	for _, tt := range []struct {
 		name string
 		want bool
@@ -107,7 +105,7 @@ func TestHandleResultMatchesClusterAndRun(t *testing.T) {
 	status["conditions"] = []interface{}{map[string]interface{}{
 		"lastTransitionTime": "2026-01-02T11:00:00Z", "reason": "NoActionRequired",
 	}}
-	m.handleResult(ctx, cluster, dyn, result)
+	m.handleResult(ctx, cluster, result)
 	runObject := &unstructured.Unstructured{Object: map[string]interface{}{
 		"metadata": map[string]interface{}{"name": run},
 		"status": map[string]interface{}{"conditions": []interface{}{
@@ -115,7 +113,7 @@ func TestHandleResultMatchesClusterAndRun(t *testing.T) {
 			map[string]interface{}{"lastTransitionTime": "2026-01-02T10:00:00Z", "type": "Progressing", "reason": "Running"},
 		}},
 	}}
-	m.handleRun(ctx, cluster, runObject)
+	m.handleRun(ctx, cluster, dyn, runObject)
 	updated := &ranv1alpha1.TelcoHealthCheckRun{}
 	if err := hub.Get(ctx, client.ObjectKey{Namespace: operatorNamespace, Name: "match"}, updated); err != nil {
 		t.Fatal(err)
@@ -125,15 +123,16 @@ func TestHandleResultMatchesClusterAndRun(t *testing.T) {
 		t.Fatalf("independent status updates not reflected: %+v", updated.Status)
 	}
 	// An AnalysisResult update cannot change AgenticRun type or phase.
-	m.handleResult(ctx, cluster, dyn, result)
+	status["actionRequired"] = "True"
+	m.handleResult(ctx, cluster, result)
 	if err := hub.Get(ctx, client.ObjectKey{Namespace: operatorNamespace, Name: "match"}, updated); err != nil {
 		t.Fatal(err)
 	}
-	if updated.Status.AgenticRunStatus.Type != "Complete" || updated.Status.AgenticRunStatus.Phase != "Succeeded" {
-		t.Fatalf("AnalysisResult overwrote run condition: %+v", updated.Status.AgenticRunStatus)
+	if updated.Status.AgenticRunStatus.Type != "Complete" || updated.Status.AgenticRunStatus.Phase != "Succeeded" || updated.Status.AgenticRunActionRequired != "False" {
+		t.Fatalf("AnalysisResult overwrote run condition: %+v", updated.Status)
 	}
 	runObject.Object["status"] = map[string]interface{}{"phase": "Running"}
-	m.handleRun(ctx, cluster, runObject)
+	m.handleRun(ctx, cluster, dyn, runObject)
 	if err := hub.Get(ctx, client.ObjectKey{Namespace: operatorNamespace, Name: "match"}, updated); err != nil {
 		t.Fatal(err)
 	}
@@ -158,16 +157,15 @@ func TestHandleResultActionRequiredWithoutConditions(t *testing.T) {
 		Labels: map[string]string{healthcheckrun.RunKeyLabel: healthcheckrun.Key(cluster, run)},
 	}, Status: ranv1alpha1.TelcoHealthCheckRunStatus{
 		ClusterName: cluster, AgenticRunName: run,
-		AgenticRunStatus: &ranv1alpha1.AgenticRunStatus{Phase: healthcheckrun.PhaseCreated},
+		AgenticRunStatus: &ranv1alpha1.AgenticRunStatus{Type: "Analyzed", Phase: healthcheckrun.PhaseCreated},
 	}}
 	hub := fake.NewClientBuilder().WithScheme(newTestScheme(t)).WithStatusSubresource(record).WithObjects(record).Build()
 	m := newSpokeWatchManager(hub, hub, operatorNamespace)
-	dyn := newResultClient()
 	result := &unstructured.Unstructured{Object: map[string]interface{}{
 		"spec":   map[string]interface{}{"agenticRunName": run},
 		"status": map[string]interface{}{"actionRequired": "False"},
 	}}
-	m.handleResult(ctx, cluster, dyn, result)
+	m.handleResult(ctx, cluster, result)
 	if err := hub.Get(ctx, client.ObjectKeyFromObject(record), record); err != nil {
 		t.Fatal(err)
 	}
@@ -178,11 +176,11 @@ func TestHandleResultActionRequiredWithoutConditions(t *testing.T) {
 
 func newResultClient() dynamic.Interface {
 	return dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), map[schema.GroupVersionResource]string{
-		analysisResultGVR: "AnalysisResultList", executionResultGVR: "ExecutionResultList",
+		analysisResultGVR: "AnalysisResultList",
 	})
 }
 
-func TestActionRequiredDependsOnExecutionResult(t *testing.T) {
+func TestActionRequiredFollowsRunType(t *testing.T) {
 	ctx := context.Background()
 	const cluster, runName = "cluster-a", "run-a"
 	record := &ranv1alpha1.TelcoHealthCheckRun{ObjectMeta: metav1.ObjectMeta{
@@ -198,11 +196,16 @@ func TestActionRequiredDependsOnExecutionResult(t *testing.T) {
 		"spec":     map[string]interface{}{"agenticRunName": runName},
 		"status":   map[string]interface{}{"actionRequired": "True", "diagnosis": map[string]interface{}{"summary": "needs work"}},
 	}}
-	execution := &unstructured.Unstructured{Object: map[string]interface{}{
-		"apiVersion": "agentic.openshift.io/v1alpha1", "kind": "ExecutionResult",
-		"metadata": map[string]interface{}{"name": "execution-a", "namespace": agenticrun.Namespace},
-		"spec":     map[string]interface{}{"agenticRunName": runName},
+	run := &unstructured.Unstructured{Object: map[string]interface{}{
+		"metadata": map[string]interface{}{"name": runName},
 	}}
+	setType := func(runType string) {
+		t.Helper()
+		run.Object["status"] = map[string]interface{}{"conditions": []interface{}{
+			map[string]interface{}{"lastTransitionTime": "2026-01-02T11:00:00Z", "type": runType, "reason": "Running"},
+		}}
+		m.handleRun(ctx, cluster, dyn, run)
+	}
 	check := func(want string) {
 		t.Helper()
 		current := &ranv1alpha1.TelcoHealthCheckRun{}
@@ -217,39 +220,31 @@ func TestActionRequiredDependsOnExecutionResult(t *testing.T) {
 	if _, err := dyn.Resource(analysisResultGVR).Namespace(agenticrun.Namespace).Create(ctx, analysis, metav1.CreateOptions{}); err != nil {
 		t.Fatal(err)
 	}
-	m.handleResult(ctx, cluster, dyn, analysis)
+	m.handleResult(ctx, cluster, analysis)
+	check("") // No type yet; analysis cannot assert action required.
+	setType("Analyzed")
 	check("True")
-
-	// A result for another run cannot suppress this run's action.
-	other := execution.DeepCopy()
-	other.SetName("execution-other")
-	other.Object["spec"] = map[string]interface{}{"agenticRunName": "run-other"}
-	if _, err := dyn.Resource(executionResultGVR).Namespace(agenticrun.Namespace).Create(ctx, other, metav1.CreateOptions{}); err != nil {
-		t.Fatal(err)
-	}
-	m.handleResult(ctx, cluster, dyn, analysis)
-	check("True")
-
-	if _, err := dyn.Resource(executionResultGVR).Namespace(agenticrun.Namespace).Create(ctx, execution, metav1.CreateOptions{}); err != nil {
-		t.Fatal(err)
-	}
-	m.handleExecutionResult(ctx, cluster, dyn, execution)
+	setType("Executing")
 	check("False")
-	// A replayed analysis event must not restore True.
-	m.handleResult(ctx, cluster, dyn, analysis)
+	m.handleResult(ctx, cluster, analysis)
 	check("False")
-	if err := dyn.Resource(executionResultGVR).Namespace(agenticrun.Namespace).Delete(ctx, execution.GetName(), metav1.DeleteOptions{}); err != nil {
-		t.Fatal(err)
-	}
-	m.handleExecutionResult(ctx, cluster, dyn, execution)
+	setType("Analyzed") // No new result event; recover the stored analysis.
 	check("True")
-
 	analysis.Object["status"].(map[string]interface{})["actionRequired"] = "False"
-	m.handleResult(ctx, cluster, dyn, analysis)
+	m.handleResult(ctx, cluster, analysis)
 	check("False")
+	setType("Complete")
+	check("False")
+	if _, err := dyn.Resource(analysisResultGVR).Namespace(agenticrun.Namespace).Update(ctx, analysis, metav1.UpdateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	setType("Analyzed")
+	check("False") // Re-entry uses the current analysis, not a prior True.
+	setType("")
+	check("")
 }
 
-func TestExecutionResultBeforeAnalysis(t *testing.T) {
+func TestRunTypeBeforeAnalysis(t *testing.T) {
 	ctx := context.Background()
 	const cluster, runName = "cluster-a", "run-a"
 	record := &ranv1alpha1.TelcoHealthCheckRun{ObjectMeta: metav1.ObjectMeta{
@@ -259,77 +254,62 @@ func TestExecutionResultBeforeAnalysis(t *testing.T) {
 	hub := fake.NewClientBuilder().WithScheme(newTestScheme(t)).WithStatusSubresource(record).WithObjects(record).Build()
 	m := newSpokeWatchManager(hub, hub, operatorNamespace)
 	dyn := newResultClient()
-	current := &ranv1alpha1.TelcoHealthCheckRun{}
-	if err := hub.Get(ctx, client.ObjectKeyFromObject(record), current); err != nil {
-		t.Fatal(err)
-	}
-	if current.Status.AgenticRunActionRequired != "" {
-		t.Fatalf("actionRequired should be unset before results, got %q", current.Status.AgenticRunActionRequired)
-	}
-	execution := &unstructured.Unstructured{Object: map[string]interface{}{
-		"apiVersion": "agentic.openshift.io/v1alpha1", "kind": "ExecutionResult",
-		"metadata": map[string]interface{}{"name": "execution-a", "namespace": agenticrun.Namespace},
-		"spec":     map[string]interface{}{"agenticRunName": runName},
+	run := &unstructured.Unstructured{Object: map[string]interface{}{
+		"metadata": map[string]interface{}{"name": runName},
+		"status": map[string]interface{}{"conditions": []interface{}{
+			map[string]interface{}{"lastTransitionTime": "2026-01-02T11:00:00Z", "type": "Executing", "reason": "Running"},
+		}},
 	}}
-	if _, err := dyn.Resource(executionResultGVR).Namespace(agenticrun.Namespace).Create(ctx, execution, metav1.CreateOptions{}); err != nil {
-		t.Fatal(err)
-	}
-	m.handleExecutionResult(ctx, cluster, dyn, execution)
+	current := &ranv1alpha1.TelcoHealthCheckRun{}
+	m.handleRun(ctx, cluster, dyn, run)
 	if err := hub.Get(ctx, client.ObjectKeyFromObject(record), current); err != nil {
 		t.Fatal(err)
 	}
 	if current.Status.AgenticRunActionRequired != "False" {
-		t.Fatalf("execution without analysis: actionRequired = %q, want False", current.Status.AgenticRunActionRequired)
+		t.Fatalf("non-Analyzed type without analysis: actionRequired = %q, want False", current.Status.AgenticRunActionRequired)
 	}
+	run.Object["status"].(map[string]interface{})["conditions"].([]interface{})[0].(map[string]interface{})["type"] = "Analyzed"
+	m.handleRun(ctx, cluster, dyn, run)
+	if err := hub.Get(ctx, client.ObjectKeyFromObject(record), current); err != nil {
+		t.Fatal(err)
+	}
+	if current.Status.AgenticRunActionRequired != "" {
+		t.Fatalf("Analyzed without analysis: actionRequired = %q, want unset", current.Status.AgenticRunActionRequired)
+	}
+	run.Object["status"].(map[string]interface{})["conditions"].([]interface{})[0].(map[string]interface{})["type"] = "Executing"
+	m.handleRun(ctx, cluster, dyn, run)
 	analysis := &unstructured.Unstructured{Object: map[string]interface{}{
-		"spec":   map[string]interface{}{"agenticRunName": runName},
-		"status": map[string]interface{}{"actionRequired": "True"},
+		"apiVersion": "agentic.openshift.io/v1alpha1", "kind": "AnalysisResult",
+		"metadata": map[string]interface{}{"name": "analysis-a", "namespace": agenticrun.Namespace},
+		"spec":     map[string]interface{}{"agenticRunName": runName},
+		"status":   map[string]interface{}{"actionRequired": "True"},
 	}}
-	m.handleResult(ctx, cluster, dyn, analysis)
+	if _, err := dyn.Resource(analysisResultGVR).Namespace(agenticrun.Namespace).Create(ctx, analysis, metav1.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	m.handleResult(ctx, cluster, analysis)
 	if err := hub.Get(ctx, client.ObjectKeyFromObject(record), current); err != nil {
 		t.Fatal(err)
 	}
 	if current.Status.AgenticRunActionRequired != "False" {
-		t.Fatalf("execution created first: actionRequired = %q, want False", current.Status.AgenticRunActionRequired)
+		t.Fatalf("analysis after run advanced: actionRequired = %q, want False", current.Status.AgenticRunActionRequired)
 	}
-	if err := dyn.Resource(executionResultGVR).Namespace(agenticrun.Namespace).Delete(ctx, execution.GetName(), metav1.DeleteOptions{}); err != nil {
-		t.Fatal(err)
-	}
-	m.handleExecutionResult(ctx, cluster, dyn, execution)
+	run.Object["status"].(map[string]interface{})["conditions"].([]interface{})[0].(map[string]interface{})["type"] = "Analyzed"
+	m.handleRun(ctx, cluster, dyn, run)
 	if err := hub.Get(ctx, client.ObjectKeyFromObject(record), current); err != nil {
 		t.Fatal(err)
 	}
-	if current.Status.AgenticRunActionRequired != "" {
-		t.Fatalf("no results remain: actionRequired = %q, want unset", current.Status.AgenticRunActionRequired)
+	if current.Status.AgenticRunActionRequired != "True" {
+		t.Fatalf("returned to Analyzed: actionRequired = %q, want True", current.Status.AgenticRunActionRequired)
 	}
-}
-
-func TestAnalysisSummarySurvivesExecutionLookupFailure(t *testing.T) {
-	ctx := context.Background()
-	const cluster, runName = "cluster-a", "run-a"
-	record := &ranv1alpha1.TelcoHealthCheckRun{ObjectMeta: metav1.ObjectMeta{
-		Name: "match", Namespace: operatorNamespace,
-		Labels: map[string]string{healthcheckrun.RunKeyLabel: healthcheckrun.Key(cluster, runName)},
-	}, Status: ranv1alpha1.TelcoHealthCheckRunStatus{ClusterName: cluster, AgenticRunName: runName}}
-	hub := fake.NewClientBuilder().WithScheme(newTestScheme(t)).WithStatusSubresource(record).WithObjects(record).Build()
-	dyn := newResultClient().(*dynamicfake.FakeDynamicClient)
-	dyn.PrependReactor("list", executionResultGVR.Resource, func(ktesting.Action) (bool, runtime.Object, error) {
-		return true, nil, fmt.Errorf("spoke unavailable")
-	})
-	result := &unstructured.Unstructured{Object: map[string]interface{}{
-		"spec": map[string]interface{}{"agenticRunName": runName},
-		"status": map[string]interface{}{
-			"actionRequired": "True", "diagnosis": map[string]interface{}{"summary": "needs work"},
-		},
-	}}
-	m := newSpokeWatchManager(hub, hub, operatorNamespace)
-	m.handleResult(ctx, cluster, dyn, result)
-	current := &ranv1alpha1.TelcoHealthCheckRun{}
+	run.Object["status"].(map[string]interface{})["conditions"].([]interface{})[0].(map[string]interface{})["type"] = "Complete"
+	run.Object["status"].(map[string]interface{})["conditions"].([]interface{})[0].(map[string]interface{})["reason"] = ""
+	m.handleRun(ctx, cluster, dyn, run)
 	if err := hub.Get(ctx, client.ObjectKeyFromObject(record), current); err != nil {
 		t.Fatal(err)
 	}
-	if current.Status.AgenticRunActionRequired != "" || current.Status.AgenticRunStatus == nil || current.Status.AgenticRunStatus.Summary != "needs work" {
-		t.Fatalf("uncertain execution state should not suppress summary or assert action: %+v", current.Status)
+	if current.Status.AgenticRunStatus.Type != "Complete" || current.Status.AgenticRunActionRequired != "False" {
+		t.Fatalf("type without reason should clear action: %+v", current.Status)
 	}
 }
 
@@ -368,7 +348,7 @@ current-context: spoke
 	original := newSpokeDynamicClient
 	defer func() { newSpokeDynamicClient = original; m.Stop() }()
 	dyn := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), map[schema.GroupVersionResource]string{
-		analysisResultGVR: "AnalysisResultList", executionResultGVR: "ExecutionResultList", agenticRunGVR: "AgenticRunList",
+		analysisResultGVR: "AnalysisResultList", agenticRunGVR: "AgenticRunList",
 	})
 	runObject := &unstructured.Unstructured{Object: map[string]interface{}{
 		"apiVersion": "agentic.openshift.io/v1alpha1", "kind": "AgenticRun",
@@ -383,18 +363,10 @@ current-context: spoke
 		"spec":     map[string]interface{}{"agenticRunName": runName},
 		"status":   map[string]interface{}{"actionRequired": "True", "diagnosis": map[string]interface{}{"summary": "healthy"}},
 	}}
-	executionObject := &unstructured.Unstructured{Object: map[string]interface{}{
-		"apiVersion": "agentic.openshift.io/v1alpha1", "kind": "ExecutionResult",
-		"metadata": map[string]interface{}{"name": "execution-a", "namespace": "openshift-lightspeed"},
-		"spec":     map[string]interface{}{"agenticRunName": runName},
-	}}
 	if _, err := dyn.Resource(agenticRunGVR).Namespace("openshift-lightspeed").Create(ctx, runObject, metav1.CreateOptions{}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := dyn.Resource(analysisResultGVR).Namespace("openshift-lightspeed").Create(ctx, resultObject, metav1.CreateOptions{}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := dyn.Resource(executionResultGVR).Namespace("openshift-lightspeed").Create(ctx, executionObject, metav1.CreateOptions{}); err != nil {
 		t.Fatal(err)
 	}
 	newSpokeDynamicClient = func(*rest.Config) (dynamic.Interface, error) { return dyn, nil }
@@ -414,7 +386,7 @@ current-context: spoke
 				seen[action.GetResource().Resource] = true
 			}
 		}
-		if seen[agenticRunGVR.Resource] && seen[analysisResultGVR.Resource] && seen[executionResultGVR.Resource] {
+		if len(seen) == 2 && seen[agenticRunGVR.Resource] && seen[analysisResultGVR.Resource] {
 			break
 		}
 		select {
@@ -439,8 +411,9 @@ current-context: spoke
 		case <-time.After(10 * time.Millisecond):
 		}
 	}
-	// Deletion events must restore the analysis value when execution ends.
-	if err := dyn.Resource(executionResultGVR).Namespace(agenticrun.Namespace).Delete(ctx, executionObject.GetName(), metav1.DeleteOptions{}); err != nil {
+	// A run returning to Analyzed must recover the analysis value without a new result event.
+	runObject.Object["status"].(map[string]interface{})["conditions"].([]interface{})[0].(map[string]interface{})["type"] = "Analyzed"
+	if _, err := dyn.Resource(agenticRunGVR).Namespace(agenticrun.Namespace).Update(ctx, runObject, metav1.UpdateOptions{}); err != nil {
 		t.Fatal(err)
 	}
 	deadline = time.After(2 * time.Second)
@@ -454,7 +427,7 @@ current-context: spoke
 		}
 		select {
 		case <-deadline:
-			t.Fatalf("execution deletion not reflected: actionRequired=%q", updated.Status.AgenticRunActionRequired)
+			t.Fatalf("Analyzed transition not reflected: actionRequired=%q", updated.Status.AgenticRunActionRequired)
 		case <-time.After(10 * time.Millisecond):
 		}
 	}

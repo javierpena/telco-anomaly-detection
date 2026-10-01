@@ -268,7 +268,7 @@ Triggered by changes to the singleton `TelcoHealthcheck` CR or `ManagedCluster` 
 2. **Deletion path** — if `DeletionTimestamp` is set, run cleanup then remove the finalizer.
 3. **Finalizer** — ensure `ran.openshift.io/telcohealthcheck-finalizer` is registered; return early if just added (triggers a new reconcile).
 4. **Log level sync** — read `spec.logLevel` from the CR; set the logger's atomic level to `debug` or `info` accordingly.
-4a. **Resolve monitored clusters and sync spoke watches** (`getMonitoredClusters`) — list `ManagedCluster` resources and apply include/exclude rules, then start/cancel AgenticRun, AnalysisResult, and ExecutionResult list/watches (including credential changes).
+4a. **Resolve monitored clusters and sync spoke watches** (`getMonitoredClusters`) — list `ManagedCluster` resources and apply include/exclude rules, then start/cancel AgenticRun and AnalysisResult list/watches (including credential changes).
 4b. **Recover pending records** — check stale pending hub records against their spoke runs. This and watch sync precede managed-resource reconciliation so unrelated resource errors cannot stop result tracking.
 5. **Reconcile system-alert ConfigMaps** (`reconcileSystemAlertConfigMaps`) — for each of the four system alerts (`hostNetwork`, `podNetwork`, `hostReservedCPU`, `ovsProcessCPU`), creates or updates the corresponding ConfigMap in the operator namespace from the embedded asset file when the spec boolean is `true`, and deletes it when `false`. Must run before the alert-rule listing step. Returns an error (requeueing) if any create/update/delete fails.
 5a. **Reconcile system-periodic ConfigMaps** (`reconcileSystemPeriodicConfigMaps`) — for each periodic check type (`rdsCompliance`), creates or updates the corresponding ConfigMap in the operator namespace from the embedded asset file when the spec boolean is `true`, and deletes it when `false`. Mirrors the behaviour of step 5 for system-alert ConfigMaps. Returns an error (requeueing) if any create/update/delete fails.
@@ -386,13 +386,14 @@ if it does not. It never creates a second spoke run. Both binaries use
 `telco-healthcheck-system`. Its spec is empty. Status contains `clusterName`,
 `agenticRunName`, `triggeredBy` (`alert` or `periodicHealthCheck`), `trigger`,
 `agenticRunStatus.{type,phase,summary}`, and optional `agenticRunActionRequired`.
-The latter is `"True"` only when `AnalysisResult.status.actionRequired` is
-`"True"` and no `ExecutionResult` exists for the same AgenticRun. It is
-`"False"` when analysis reports `"False"` or an execution result exists,
-and is otherwise omitted. VerificationResult and EscalationResult do not
-change this value. The record timestamp gives its age. Alert records use the
-spoke run name; periodic records append the cluster name because one run name
-is reused across spokes.
+The latter follows `AnalysisResult.status.actionRequired` (`"True"` or
+`"False"`) while the latest AgenticRun condition type is `Analyzed`. As soon
+as a non-empty type other than `Analyzed` is observed, it becomes `"False"`.
+It is omitted while the type is empty, or while `Analyzed` has no analysis
+actionRequired value. Returning to `Analyzed` reads the current AnalysisResult
+value, even if no new result event arrives. The record timestamp gives its age.
+Alert records use the spoke run name; periodic records append the cluster name
+because one run name is reused across spokes.
 Records carry the singleton owner reference and a hashed run/cluster label
 for correlation.
 
@@ -400,11 +401,11 @@ for correlation.
 Phase, with Cluster, AgenticRun, Action Required, and Age. Type and Phase are
 populated from the type and reason of the same latest AgenticRun condition.
 Type shows `<none>` until a condition is observed; Action Required shows
-`<none>` until analysis or execution supplies a value.
+`<none>` until a type is observed, or until analysis supplies a value when
+the type is `Analyzed`.
 
-The controller maintains separate list/watches of `agenticruns.agentic.openshift.io`,
-`analysisresults.agentic.openshift.io`, and `executionresults.agentic.openshift.io`
-in `openshift-lightspeed` per monitored
+The controller maintains separate list/watches of `agenticruns.agentic.openshift.io`
+and `analysisresults.agentic.openshift.io` in `openshift-lightspeed` per monitored
 spoke. Each list establishes its watch resourceVersion and replays existing
 objects after disconnects. The watches reconnect on failure and continue after
 individual runs complete. They stop on cluster removal, singleton deletion,
@@ -415,12 +416,12 @@ condition with the latest valid `lastTransitionTime`; phase is not taken from
 the `status.phase` lifecycle field. Until such a condition is available it
 retains the creation phase. AnalysisResult updates do not change type or phase:
 `summary` comes from the top-level diagnosis, first option diagnosis/summary,
-or failure reason. AnalysisResult events check current ExecutionResults before
-updating `agenticRunActionRequired`, and ExecutionResult events (including
-deletion) recompute it using the remaining results. An ExecutionResult relist
-also detects deletions missed during a watch disconnect. The watches serialize
-spoke reads and hub status patches to avoid restoring a stale `"True"` when
-the result streams arrive in a different order.
+or failure reason. AnalysisResult events update `agenticRunActionRequired` only
+while the current type is `Analyzed`; other types force `"False"`. On return to
+`Analyzed`, the controller lists AnalysisResults to recover the current value
+without waiting for another event. The watches serialize spoke reads and hub
+status patches so a late analysis event cannot restore `"True"` after the type
+has moved away from `Analyzed`.
 Removing a cluster leaves its historical records with their last observed
 status.
 
@@ -647,8 +648,8 @@ Secret namespace: <clusterName>
 Secret key:       kubeconfig
 ```
 
-The controller and alert receiver both build a spoke-side `client.Client` from these bytes via `clientcmd.RESTConfigFromKubeConfig`. The spoke client creates AgenticRuns and checks pending run identities in `openshift-lightspeed`. The controller also builds a dynamic spoke client to list/watch AgenticRuns, AnalysisResults, and ExecutionResults there.
-The ACM admin kubeconfig must permit `get`/`list`/`watch` on AgenticRuns and `list`/`watch` on AnalysisResults and ExecutionResults in that namespace; those permissions are evaluated on the spoke, not by the hub ClusterRole.
+The controller and alert receiver both build a spoke-side `client.Client` from these bytes via `clientcmd.RESTConfigFromKubeConfig`. The spoke client creates AgenticRuns and checks pending run identities in `openshift-lightspeed`. The controller also builds a dynamic spoke client to list/watch AgenticRuns and AnalysisResults there.
+The ACM admin kubeconfig must permit `get`/`list`/`watch` on AgenticRuns and `list`/`watch` on AnalysisResults in that namespace; those permissions are evaluated on the spoke, not by the hub ClusterRole.
 
 ---
 

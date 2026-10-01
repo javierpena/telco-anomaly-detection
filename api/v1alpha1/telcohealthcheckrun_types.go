@@ -37,10 +37,10 @@ type TelcoHealthCheckRunStatus struct {
 	Trigger        string      `json:"trigger"`
 	// +optional
 	AgenticRunStatus *AgenticRunStatus `json:"agenticRunStatus,omitempty"`
-	// AgenticRunActionRequired is True only when AnalysisResult reports
-	// actionRequired=True and no ExecutionResult exists for this AgenticRun.
-	// It is False if execution has started or analysis reports False, and is
-	// absent until either result provides a value.
+	// AgenticRunActionRequired follows AnalysisResult.status.actionRequired while
+	// the latest AgenticRun condition type is Analyzed. Any other non-empty type
+	// sets it to False. It is absent while the type is empty, or while Analyzed
+	// has no actionRequired value from AnalysisResult.
 	// +optional
 	// +kubebuilder:validation:Enum=True;False
 	AgenticRunActionRequired string `json:"agenticRunActionRequired,omitempty"`
