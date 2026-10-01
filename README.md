@@ -73,9 +73,12 @@ spec:
 
   periodicHealthChecks:
     period: 6h             # default interval; 0 disables periodic checks
+    # minJitter: 30s      # default minimum per-cluster creation delay
+    # maxJitter: 5m       # default maximum; set both bounds to 0s to disable jitter
     rdsCompliance:
       enabled: false       # enable the currently implemented periodic check
       # period: 24h        # optional RDS-specific override
+      # maxJitter: 10m     # optional override of just the upper bound
 
   logLevel: info           # info or debug; changes on next reconcile
   # purgeInterval: 168h   # optional retention for hub run records
@@ -84,7 +87,13 @@ spec:
 Only RDS compliance currently uses the periodic schedule. Enabling it deploys
 `kube-compare-mcp` in the operator namespace; with a nonzero default period, it
 also creates a run on each monitored spoke when due. The RDS check can override
-the default interval with `rdsCompliance.period`.
+the default interval with `rdsCompliance.period`. Periodic AgenticRun creation
+is spread across an independent 30s–5m window per cluster by default. Either
+RDS jitter bound can override its global bound independently; bounds must be
+non-negative and the effective minimum must not exceed the maximum. To create
+runs synchronously, set both global bounds to `0s` (unless overridden for RDS).
+The status timestamp marks when the interval was claimed, so a controller
+restart during a delay may skip that interval's run on some spokes.
 
 ### Alert types
 

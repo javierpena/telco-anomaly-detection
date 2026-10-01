@@ -160,6 +160,22 @@ spec:
                 description: PeriodicHealthChecks defines the schedule for periodic
                   agentic health checks.
                 properties:
+                  maxJitter:
+                    description: |-
+                      MaxJitter is the upper bound of the independent per-cluster delay.
+                      Defaults to 5m when omitted.
+                    type: string
+                    x-kubernetes-validations:
+                    - message: maxJitter must be non-negative
+                      rule: duration(self) >= duration('0s')
+                  minJitter:
+                    description: |-
+                      MinJitter is the lower bound of the independent per-cluster delay.
+                      Defaults to 30s when omitted. Set both bounds to 0s to disable jitter.
+                    type: string
+                    x-kubernetes-validations:
+                    - message: minJitter must be non-negative
+                      rule: duration(self) >= duration('0s')
                   period:
                     description: Period is the default interval between periodic health
                       checks across all clusters.
@@ -172,6 +188,20 @@ spec:
                         description: Enabled activates RDS compliance checks when
                           true.
                         type: boolean
+                      maxJitter:
+                        description: MaxJitter overrides the global maximum per-cluster
+                          creation delay.
+                        type: string
+                        x-kubernetes-validations:
+                        - message: maxJitter must be non-negative
+                          rule: duration(self) >= duration('0s')
+                      minJitter:
+                        description: MinJitter overrides the global minimum per-cluster
+                          creation delay.
+                        type: string
+                        x-kubernetes-validations:
+                        - message: minJitter must be non-negative
+                          rule: duration(self) >= duration('0s')
                       period:
                         description: Period overrides the default check interval for
                           RDS compliance checks.
@@ -182,6 +212,17 @@ spec:
                 required:
                 - period
                 type: object
+                x-kubernetes-validations:
+                - message: effective global minJitter must be less than or equal to
+                    maxJitter
+                  rule: 'duration(has(self.minJitter) ? self.minJitter : ''30s'')
+                    <= duration(has(self.maxJitter) ? self.maxJitter : ''5m'')'
+                - message: effective RDS compliance minJitter must be less than or
+                    equal to maxJitter
+                  rule: '!has(self.rdsCompliance) || duration(has(self.rdsCompliance.minJitter)
+                    ? self.rdsCompliance.minJitter : (has(self.minJitter) ? self.minJitter
+                    : ''30s'')) <= duration(has(self.rdsCompliance.maxJitter) ? self.rdsCompliance.maxJitter
+                    : (has(self.maxJitter) ? self.maxJitter : ''5m''))'
               purgeInterval:
                 description: |-
                   PurgeInterval is the maximum age of hub-side run records. When omitted,

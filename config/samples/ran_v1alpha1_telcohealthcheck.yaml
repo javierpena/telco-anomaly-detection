@@ -31,11 +31,16 @@ spec:
   #     name: alertmanager-credentials  # Secret in telco-healthcheck-system
 
   periodicHealthChecks:
-    # Run a general health check on every spoke every 6 hours.
+    # Check each spoke every 6 hours when a periodic check is enabled.
     period: 6h
+    # Each spoke starts independently after a delay in this window (defaults: 30s–5m).
+    # minJitter: 30s
+    # maxJitter: 5m
+    # Set both to 0s to create runs synchronously.
     rdsCompliance:
       enabled: false
       # period: 24h  # uncomment to override the default period for RDS checks
+      # maxJitter: 10m  # override only the global maximum for this check
 
   # Keep hub-side run records for 7 days; omit to retain them indefinitely.
   # purgeInterval: 168h

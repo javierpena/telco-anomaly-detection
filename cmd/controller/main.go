@@ -107,12 +107,14 @@ func main() {
 		os.Exit(1)
 	}
 
+	shutdownCtx := ctrl.SetupSignalHandler()
 	if err = (&controller.TelcoHealthcheckReconciler{
 		Client:              mgr.GetClient(),
 		Scheme:              mgr.GetScheme(),
 		OperatorNamespace:   operatorNamespace,
 		AlertReceiverSvcURL: alertReceiverURL,
 		LogLevel:            &atomicLevel,
+		ShutdownContext:     shutdownCtx,
 	}).SetupWithManager(mgr); err != nil {
 		logger.Error(err, "unable to create TelcoHealthcheck controller")
 		os.Exit(1)
@@ -143,7 +145,7 @@ func main() {
 		"operatorNamespace", operatorNamespace,
 		"leaderElection", enableLeaderElection)
 
-	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
+	if err := mgr.Start(shutdownCtx); err != nil {
 		logger.Error(err, "problem running manager")
 		os.Exit(1)
 	}

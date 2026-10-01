@@ -114,6 +114,13 @@
 - [x] **B — Validating webhook:** New `internal/webhook/` package with `TelcoHealthcheckValidator` (rejects CREATE with non-canonical name); wire webhook server (port 9443) into `cmd/controller/main.go`; new `config/webhook/` with Service + `ValidatingWebhookConfiguration` (OpenShift service-CA TLS)
 - [x] **F — Manifests & docs:** Add webhook port and cert Secret volume to `config/manager/manager.yaml`; update Makefile deploy/undeploy; update sample CR; update `README.md`, `docs/architecture.md`, `AGENTS.md`; mark `docs/future/cluster-scoped-crd.md` superseded
 
+## Phase 15: Per-cluster Jitter for Periodic Health Checks ✅
+
+- [x] Add global and RDS-specific optional jitter bounds, effective-window admission validation, and regenerate the CRD and DeepCopy code.
+- [x] Schedule independent per-cluster delays with shutdown cancellation; retain synchronous creation for `0s`/`0s` and hub-record creation before spoke creation.
+- [x] Test inherited bounds, generated CRD validation, asynchronous scheduling, cancellation, and the existing schedule claim.
+- [x] Document defaults, overrides, and restart behavior in the architecture, sample, and README.
+
 ## Verification Commands
 
 ```bash

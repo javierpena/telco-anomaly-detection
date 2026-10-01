@@ -50,12 +50,32 @@ type RDSComplianceSpec struct {
 	Period *metav1.Duration `json:"period,omitempty"`
 	// Enabled activates RDS compliance checks when true.
 	Enabled bool `json:"enabled"`
+	// MinJitter overrides the global minimum per-cluster creation delay.
+	// +optional
+	// +kubebuilder:validation:XValidation:rule="duration(self) >= duration('0s')",message="minJitter must be non-negative"
+	MinJitter *metav1.Duration `json:"minJitter,omitempty"`
+	// MaxJitter overrides the global maximum per-cluster creation delay.
+	// +optional
+	// +kubebuilder:validation:XValidation:rule="duration(self) >= duration('0s')",message="maxJitter must be non-negative"
+	MaxJitter *metav1.Duration `json:"maxJitter,omitempty"`
 }
 
 // PeriodicHealthChecksSpec defines the schedule for periodic agentic health checks.
+// +kubebuilder:validation:XValidation:rule="duration(has(self.minJitter) ? self.minJitter : '30s') <= duration(has(self.maxJitter) ? self.maxJitter : '5m')",message="effective global minJitter must be less than or equal to maxJitter"
+// +kubebuilder:validation:XValidation:rule="!has(self.rdsCompliance) || duration(has(self.rdsCompliance.minJitter) ? self.rdsCompliance.minJitter : (has(self.minJitter) ? self.minJitter : '30s')) <= duration(has(self.rdsCompliance.maxJitter) ? self.rdsCompliance.maxJitter : (has(self.maxJitter) ? self.maxJitter : '5m'))",message="effective RDS compliance minJitter must be less than or equal to maxJitter"
 type PeriodicHealthChecksSpec struct {
 	// Period is the default interval between periodic health checks across all clusters.
 	Period metav1.Duration `json:"period"`
+	// MinJitter is the lower bound of the independent per-cluster delay.
+	// Defaults to 30s when omitted. Set both bounds to 0s to disable jitter.
+	// +optional
+	// +kubebuilder:validation:XValidation:rule="duration(self) >= duration('0s')",message="minJitter must be non-negative"
+	MinJitter *metav1.Duration `json:"minJitter,omitempty"`
+	// MaxJitter is the upper bound of the independent per-cluster delay.
+	// Defaults to 5m when omitted.
+	// +optional
+	// +kubebuilder:validation:XValidation:rule="duration(self) >= duration('0s')",message="maxJitter must be non-negative"
+	MaxJitter *metav1.Duration `json:"maxJitter,omitempty"`
 	// RDSCompliance configures the RDS compliance check schedule and enablement.
 	// +optional
 	RDSCompliance RDSComplianceSpec `json:"rdsCompliance,omitempty"`

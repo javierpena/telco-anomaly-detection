@@ -1,6 +1,13 @@
 # Plan: Per-cluster jitter for periodic health check AgenticRun creation
 
-**Status:** Proposed (not yet implemented).
+**Status:** Implemented. This file records the original proposal; see
+`docs/architecture.md` for current behavior. The implementation uses
+`createAgenticRunsForClustersWithConfig` after the status claim, passes the
+same shutdown context to the reconciler and `mgr.Start` (controller-runtime
+v0.19 has no `mgr.GetContext()`), and validates effective inherited bounds.
+Equal positive bounds produce a fixed delay; only `0s`/`0s` disables jitter.
+In-memory delayed work can be skipped if the controller shuts down before it
+starts; the next scheduled interval is still eligible.
 
 ## Motivation
 
@@ -229,8 +236,9 @@ periodicHealthChecks:
 
 Apply the CR, wait for the period to elapse, then:
 ```bash
-kubectl logs -n telco-healthcheck-system deployment/telco-anomaly-controller | grep -i jitter
-# Observe "creating AgenticRun" log lines arriving spread between 5s and 30s after trigger
+kubectl logs -n telco-healthcheck-system deployment/telco-anomaly-controller | grep -E 'scheduled periodic AgenticRun|created AgenticRun'
+# The RDS override above schedules delays in [10s, 2m]; compare the schedule
+# and creation log timestamps for each cluster.
 ```
 
 To verify disable:
@@ -250,12 +258,10 @@ All AgenticRuns should appear within a single reconcile (current behavior).
   pool could be considered if this becomes a problem in practice.
 - **`rand.Int63n` seeding:** Go's `math/rand` global source is automatically
   seeded since Go 1.20. No explicit seed is needed.
-- **Validation:** The CEL rule on `PeriodicHealthChecksSpec` enforces
-  `minJitter <= maxJitter` at admission time. The controller also guards
-  defensively at runtime (if `minJitter >= maxJitter`, falls back to synchronous
-  behavior and logs a warning).
-- **Per-check jitter:** `MinJitter`/`MaxJitter` are global; they apply equally
-  to all periodic sub-checks (currently only RDS compliance). If future
-  sub-checks need independent jitter control, per-check fields can be added to
-  each sub-check spec (e.g. `RDSComplianceSpec.MinJitter`/`MaxJitter`) and the
-  global fields demoted to defaults.
+- **Validation:** CEL rules on `PeriodicHealthChecksSpec` enforce effective
+  global and RDS compliance `minJitter <= maxJitter`, including inherited
+  single-bound overrides. Field-level rules reject negative durations. The
+  controller also rejects invalid effective windows before claiming an interval.
+- **Per-check jitter:** `MinJitter`/`MaxJitter` are global defaults; RDS
+  compliance already supports independent per-bound overrides. Future checks
+  should add the same override fields and effective-window validation.

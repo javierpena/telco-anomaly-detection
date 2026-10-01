@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -62,11 +63,47 @@ func TestShouldRunCheck(t *testing.T) {
 	})
 }
 
+func TestResolvePeriodicJitter(t *testing.T) {
+	duration := func(d time.Duration) *metav1.Duration { return &metav1.Duration{Duration: d} }
+	for _, tc := range []struct {
+		name               string
+		p                  ranv1alpha1.PeriodicHealthChecksSpec
+		checkMin, checkMax *metav1.Duration
+		min, max           time.Duration
+		bad                bool
+	}{
+		{name: "defaults", min: 30 * time.Second, max: 5 * time.Minute},
+		{name: "global max only", p: ranv1alpha1.PeriodicHealthChecksSpec{MaxJitter: duration(time.Minute)}, min: 30 * time.Second, max: time.Minute},
+		{name: "check min inherits global max", p: ranv1alpha1.PeriodicHealthChecksSpec{MaxJitter: duration(time.Minute)},
+			checkMin: duration(45 * time.Second), min: 45 * time.Second, max: time.Minute},
+		{name: "check max inherits global min", checkMax: duration(30 * time.Second), min: 30 * time.Second, max: 30 * time.Second},
+		{name: "zero disables", p: ranv1alpha1.PeriodicHealthChecksSpec{MinJitter: duration(0), MaxJitter: duration(0)}},
+		{name: "fixed delay", p: ranv1alpha1.PeriodicHealthChecksSpec{MinJitter: duration(time.Second), MaxJitter: duration(time.Second)}, min: time.Second, max: time.Second},
+		{name: "global invalid with single bound", p: ranv1alpha1.PeriodicHealthChecksSpec{MaxJitter: duration(0)}, bad: true},
+		{name: "global negative", p: ranv1alpha1.PeriodicHealthChecksSpec{MinJitter: duration(-time.Second)}, bad: true},
+		{name: "check invalid with single bound", checkMax: duration(0), bad: true},
+		{name: "check negative", checkMin: duration(-time.Second), bad: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			min, max, err := resolvePeriodicJitter(tc.p, "future-check", tc.checkMin, tc.checkMax)
+			if (err != nil) != tc.bad || (!tc.bad && (min != tc.min || max != tc.max)) {
+				t.Fatalf("got [%s, %s], error %v; want [%s, %s], bad %t", min, max, err, tc.min, tc.max, tc.bad)
+			}
+			if tc.name == "check invalid with single bound" && !strings.Contains(err.Error(), "future-check") {
+				t.Fatalf("check-specific error should name the check: %v", err)
+			}
+		})
+	}
+}
+
 func TestRunPeriodicChecks_StaleReconcileCannotCreateDuplicate(t *testing.T) {
 	scheme := newTestScheme(t)
 	thc := makeTelcoHealthcheck()
 	thc.UID = "test-owner-uid"
 	thc.Spec.PeriodicHealthChecks.RDSCompliance.Enabled = true
+	zero := metav1.Duration{}
+	thc.Spec.PeriodicHealthChecks.MinJitter = &zero
+	thc.Spec.PeriodicHealthChecks.MaxJitter = &zero
 
 	spoke := fake.NewClientBuilder().WithScheme(runtime.NewScheme()).Build()
 	originalBuildSpokeClient := buildSpokeClient
@@ -115,6 +152,35 @@ func TestRunPeriodicChecks_StaleReconcileCannotCreateDuplicate(t *testing.T) {
 	}
 	if len(runs.Items) != 1 {
 		t.Fatalf("expected exactly one AgenticRun for the interval, got %d", len(runs.Items))
+	}
+}
+
+func TestRunPeriodicChecks_ClaimsBeforeDelayedCreation(t *testing.T) {
+	thc := makeTelcoHealthcheck()
+	thc.UID = "owner"
+	thc.Spec.PeriodicHealthChecks.RDSCompliance.Enabled = true
+	thc.Spec.PeriodicHealthChecks.MinJitter = &metav1.Duration{Duration: time.Hour}
+	thc.Spec.PeriodicHealthChecks.MaxJitter = &metav1.Duration{Duration: time.Hour}
+	hub := fake.NewClientBuilder().WithScheme(newTestScheme(t)).
+		WithStatusSubresource(&ranv1alpha1.TelcoHealthcheck{}, &ranv1alpha1.TelcoHealthCheckRun{}).
+		WithObjects(thc, makeAgenticRunConfigMap("telco-anomaly-rds-compliance-config", operatorNamespace)).Build()
+	stopCtx, stop := context.WithCancel(context.Background())
+	defer stop()
+	r := &TelcoHealthcheckReconciler{Client: hub, ShutdownContext: stopCtx}
+	if _, persisted, err := r.runPeriodicChecks(context.Background(), thc, []string{"cluster-a"}); err != nil || !persisted {
+		t.Fatalf("expected claimed interval, got persisted=%t err=%v", persisted, err)
+	}
+	stop()
+	var stored ranv1alpha1.TelcoHealthcheck
+	if err := hub.Get(context.Background(), types.NamespacedName{Name: thc.Name}, &stored); err != nil {
+		t.Fatal(err)
+	}
+	if stored.Status.LastRDSComplianceRunTime == nil || shouldRunCheck(stored.Status.LastRDSComplianceRunTime, time.Hour) {
+		t.Fatal("due interval was not claimed before delayed creation")
+	}
+	var records ranv1alpha1.TelcoHealthCheckRunList
+	if err := hub.List(context.Background(), &records); err != nil || len(records.Items) != 0 {
+		t.Fatalf("canceled delayed interval created records: %+v, err=%v", records.Items, err)
 	}
 }
 

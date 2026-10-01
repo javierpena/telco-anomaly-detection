@@ -123,6 +123,16 @@ func (in *ManagedClustersSpec) DeepCopy() *ManagedClustersSpec {
 func (in *PeriodicHealthChecksSpec) DeepCopyInto(out *PeriodicHealthChecksSpec) {
 	*out = *in
 	out.Period = in.Period
+	if in.MinJitter != nil {
+		in, out := &in.MinJitter, &out.MinJitter
+		*out = new(v1.Duration)
+		**out = **in
+	}
+	if in.MaxJitter != nil {
+		in, out := &in.MaxJitter, &out.MaxJitter
+		*out = new(v1.Duration)
+		**out = **in
+	}
 	in.RDSCompliance.DeepCopyInto(&out.RDSCompliance)
 }
 
@@ -141,6 +151,16 @@ func (in *RDSComplianceSpec) DeepCopyInto(out *RDSComplianceSpec) {
 	*out = *in
 	if in.Period != nil {
 		in, out := &in.Period, &out.Period
+		*out = new(v1.Duration)
+		**out = **in
+	}
+	if in.MinJitter != nil {
+		in, out := &in.MinJitter, &out.MinJitter
+		*out = new(v1.Duration)
+		**out = **in
+	}
+	if in.MaxJitter != nil {
+		in, out := &in.MaxJitter, &out.MaxJitter
 		*out = new(v1.Duration)
 		**out = **in
 	}

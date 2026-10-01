@@ -53,6 +53,8 @@ type TelcoHealthcheckReconciler struct {
 	// verbose logLevel across all TelcoHealthcheck CRs.
 	LogLevel     *uberzap.AtomicLevel
 	SpokeWatches *SpokeWatchManager
+	// ShutdownContext cancels delayed periodic runs when the manager stops.
+	ShutdownContext context.Context
 }
 
 // Reconcile is the main reconciliation loop. It is called when a TelcoHealthcheck object
@@ -286,6 +288,11 @@ func (r *TelcoHealthcheckReconciler) runPeriodicChecks(
 	// RDS compliance check.
 	rds := thc.Spec.PeriodicHealthChecks.RDSCompliance
 	if rds.Enabled {
+		minJitter, maxJitter, err := resolvePeriodicJitter(thc.Spec.PeriodicHealthChecks,
+			"rds-compliance", rds.MinJitter, rds.MaxJitter)
+		if err != nil {
+			return requeueAfter, false, err
+		}
 		rdsPeriod := period
 		if rds.Period != nil {
 			rdsPeriod = rds.Period.Duration
@@ -308,7 +315,12 @@ func (r *TelcoHealthcheckReconciler) runPeriodicChecks(
 			}
 			statusPersisted = true
 
-			if err := createAgenticRunsForClustersWithConfig(ctx, r.Client, thc, monitoredClusters, "rds-compliance", cfg); err != nil {
+			delayCtx := r.ShutdownContext
+			if delayCtx == nil {
+				delayCtx = ctx
+			}
+			if err := createAgenticRunsForClustersWithConfig(ctx, r.Client, thc.DeepCopy(), monitoredClusters,
+				"rds-compliance", cfg, minJitter, maxJitter, delayCtx); err != nil {
 				return requeueAfter, statusPersisted, fmt.Errorf("creating RDS compliance AgenticRuns: %w", err)
 			}
 		} else if thc.Status.LastRDSComplianceRunTime != nil {
@@ -320,6 +332,34 @@ func (r *TelcoHealthcheckReconciler) runPeriodicChecks(
 	}
 
 	return requeueAfter, statusPersisted, nil
+}
+
+// resolvePeriodicJitter applies global defaults and independent per-check
+// overrides, then validates both windows if admission validation was bypassed.
+func resolvePeriodicJitter(p ranv1alpha1.PeriodicHealthChecksSpec, checkName string,
+	checkMin, checkMax *metav1.Duration,
+) (time.Duration, time.Duration, error) {
+	globalMin, globalMax := 30*time.Second, 5*time.Minute
+	if p.MinJitter != nil {
+		globalMin = p.MinJitter.Duration
+	}
+	if p.MaxJitter != nil {
+		globalMax = p.MaxJitter.Duration
+	}
+	if globalMin < 0 || globalMax < globalMin {
+		return 0, 0, fmt.Errorf("invalid global jitter window [%s, %s]", globalMin, globalMax)
+	}
+	minJitter, maxJitter := globalMin, globalMax
+	if checkMin != nil {
+		minJitter = checkMin.Duration
+	}
+	if checkMax != nil {
+		maxJitter = checkMax.Duration
+	}
+	if minJitter < 0 || maxJitter < minJitter {
+		return 0, 0, fmt.Errorf("invalid %s jitter window [%s, %s]", checkName, minJitter, maxJitter)
+	}
+	return minJitter, maxJitter, nil
 }
 
 // shouldRunCheck returns true if lastRun is nil (never run) or the period has elapsed.

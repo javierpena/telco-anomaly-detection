@@ -21,7 +21,7 @@ createAgenticRunsForClusters
 AgenticRun created in openshift-lightspeed on spoke
 ```
 
-On each reconcile the controller checks whether the check's period has elapsed. If it has, it reads the AgenticRun configuration from the corresponding ConfigMap (request prompt, skills, MCP servers), expands any `${VAR}` placeholders, and creates an `AgenticRun` on each spoke cluster.
+On each reconcile the controller checks whether the check's period has elapsed. If it has, it validates the AgenticRun configuration from the corresponding ConfigMap (request prompt, skills, MCP servers), claims the interval in status, then schedules an `AgenticRun` on each spoke cluster. Each cluster waits an independent delay in the effective jitter window (30s–5m by default) before variable expansion and creation; `0s`/`0s` is synchronous. Delayed tasks are canceled on controller shutdown, so a claimed interval can be skipped if the controller stops during the wait.
 
 The ConfigMap is managed by `reconcileSystemPeriodicConfigMaps`: when the spec boolean is `true` the ConfigMap is created or updated from the embedded asset; when `false` it is deleted. On CR deletion `cleanupSystemPeriodicConfigMaps` removes it unconditionally.
 
@@ -88,16 +88,23 @@ In `api/v1alpha1/telcohealthcheck_types.go`:
        // Period overrides the default check interval.
        // +optional
        Period *metav1.Duration `json:"period,omitempty"`
-       // Enabled activates the check when true.
-       Enabled bool `json:"enabled"`
+        // Enabled activates the check when true.
+        Enabled bool `json:"enabled"`
+        // MinJitter and MaxJitter override the corresponding global bounds independently.
+        // +optional
+        MinJitter *metav1.Duration `json:"minJitter,omitempty"`
+        // +optional
+        MaxJitter *metav1.Duration `json:"maxJitter,omitempty"`
    }
    ```
 
 2. Add a field to `PeriodicHealthChecksSpec`:
    ```go
    type PeriodicHealthChecksSpec struct {
-       Period        metav1.Duration `json:"period"`
-       RDSCompliance RDSComplianceSpec `json:"rdsCompliance,omitempty"`
+        Period        metav1.Duration `json:"period"`
+        MinJitter     *metav1.Duration `json:"minJitter,omitempty"`
+        MaxJitter     *metav1.Duration `json:"maxJitter,omitempty"`
+        RDSCompliance RDSComplianceSpec `json:"rdsCompliance,omitempty"`
        <Name>        <Name>Spec        `json:"<camelName>,omitempty"`
    }
    ```
@@ -108,6 +115,12 @@ In `api/v1alpha1/telcohealthcheck_types.go`:
    // +optional
    Last<Name>RunTime *metav1.Time `json:"last<Name>RunTime,omitempty"`
    ```
+
+Add CRD validation for the new check's effective jitter window alongside the
+existing RDS validation on `PeriodicHealthChecksSpec`: resolve each bound from
+its per-check override, then the global field, then the 30s/5m default. Reject
+negative durations and effective minimums greater than maximums. Also add the
+corresponding runtime validation before claiming a schedule interval.
 
 Then regenerate:
 
@@ -135,11 +148,14 @@ The key must match the `checkName` value in the asset YAML (step 1). The value m
 
 ## Step 5 — Add the check to `runPeriodicChecks`
 
-In `internal/controller/telcohealthcheck_controller.go`, inside `runPeriodicChecks`, add a block modelled after the existing RDS compliance block:
+In `internal/controller/telcohealthcheck_controller.go`, inside `runPeriodicChecks`, add a block modelled after the existing RDS compliance block. Use the shared helper to resolve and validate the effective jitter window before making a status claim:
 
 ```go
 check := thc.Spec.PeriodicHealthChecks.<Name>
 if check.Enabled {
+    checkMinJitter, checkMaxJitter, err := resolvePeriodicJitter(
+        thc.Spec.PeriodicHealthChecks, "<name>", check.MinJitter, check.MaxJitter)
+    if err != nil { return requeueAfter, statusPersisted, err }
     checkPeriod := period
     if check.Period != nil {
         checkPeriod = check.Period.Duration
@@ -147,10 +163,20 @@ if check.Enabled {
 
     if shouldRunCheck(thc.Status.Last<Name>RunTime, checkPeriod) {
         logger.Info("running <name> health checks")
-        if err := createAgenticRunsForClusters(ctx, r.Client, thc, monitoredClusters, "<name>"); err != nil {
-            logger.Error(err, "error during <name> checks")
-        } else {
-            thc.Status.Last<Name>RunTime = &now
+        cfg, err := loadRunConfigForCheck(ctx, r.Client, "<name>")
+        if err != nil {
+            return requeueAfter, statusPersisted, err
+        }
+        thc.Status.Last<Name>RunTime = &now
+        if err := r.Status().Update(ctx, thc); err != nil {
+            return requeueAfter, statusPersisted, err
+        }
+        statusPersisted = true
+        delayCtx := r.ShutdownContext
+        if delayCtx == nil { delayCtx = ctx }
+        if err := createAgenticRunsForClustersWithConfig(ctx, r.Client, thc.DeepCopy(), monitoredClusters,
+            "<name>", cfg, checkMinJitter, checkMaxJitter, delayCtx); err != nil {
+            return requeueAfter, statusPersisted, err
         }
     } else if thc.Status.Last<Name>RunTime != nil {
         untilNext := checkPeriod - time.Since(thc.Status.Last<Name>RunTime.Time)
@@ -160,6 +186,10 @@ if check.Enabled {
     }
 }
 ```
+
+As with RDS, this preserves optimistic locking: a stale reconcile must fail its
+status update before launching any cluster tasks. A status claim records the
+scheduling decision, even if the process stops before all delayed runs start.
 
 ---
 

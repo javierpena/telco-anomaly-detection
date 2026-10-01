@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"testing"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -195,5 +196,96 @@ func TestCreateAgenticRunsForClusters_UnknownCheckType(t *testing.T) {
 	err := createAgenticRunsForClusters(context.Background(), hubClient, thc, []string{"cluster-a"}, "unknown-type")
 	if err == nil {
 		t.Error("expected error for unmapped check type, got nil")
+	}
+}
+
+func TestRandomJitter(t *testing.T) {
+	for _, bounds := range [][2]time.Duration{
+		{0, time.Millisecond},
+		{time.Millisecond, 2 * time.Millisecond},
+		{time.Second, time.Second},
+		{0, time.Duration(1<<63 - 1)},
+	} {
+		for i := 0; i < 100; i++ {
+			delay := randomJitter(bounds[0], bounds[1])
+			if delay < bounds[0] || delay > bounds[1] {
+				t.Fatalf("jitter %s outside [%s, %s]", delay, bounds[0], bounds[1])
+			}
+		}
+	}
+}
+
+func TestCreateAgenticRunsForClustersWithConfig_JitterAndCancellation(t *testing.T) {
+	scheme := newTestScheme(t)
+	spokeA := fake.NewClientBuilder().WithScheme(runtime.NewScheme()).Build()
+	spokeB := fake.NewClientBuilder().WithScheme(runtime.NewScheme()).Build()
+	original := buildSpokeClient
+	defer func() { buildSpokeClient = original }()
+	buildSpokeClient = func(kubeconfig []byte) (client.Client, error) {
+		if string(kubeconfig) == "kubeconfig-data-for-cluster-a" {
+			return spokeA, nil
+		}
+		return spokeB, nil
+	}
+
+	hub := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&ranv1alpha1.TelcoHealthCheckRun{}).
+		WithObjects(makeKubeconfigSecret("cluster-a"), makeKubeconfigSecret("cluster-b")).Build()
+	thc := &ranv1alpha1.TelcoHealthcheck{ObjectMeta: metav1.ObjectMeta{Name: "telco-healthcheck", UID: "owner"}}
+	cfg := &agenticrun.RunConfig{Request: "check ${CLUSTER_NAME}"}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// A fixed positive window must return without attempting any hub or spoke
+	// writes; both clusters are then processed with the same run name.
+	if err := createAgenticRunsForClustersWithConfig(ctx, hub, thc, []string{"cluster-a", "cluster-b"},
+		"rds-compliance", cfg, 100*time.Millisecond, 100*time.Millisecond, ctx); err != nil {
+		t.Fatal(err)
+	}
+	var records ranv1alpha1.TelcoHealthCheckRunList
+	if err := hub.List(ctx, &records); err != nil {
+		t.Fatal(err)
+	}
+	if len(records.Items) != 0 {
+		t.Fatalf("creation must wait for jitter; got %d records", len(records.Items))
+	}
+	deadline := time.After(5 * time.Second)
+	for {
+		if err := hub.List(ctx, &records); err != nil {
+			t.Fatal(err)
+		}
+		if len(records.Items) == 2 && records.Items[0].Status.AgenticRunStatus != nil &&
+			records.Items[1].Status.AgenticRunStatus != nil &&
+			records.Items[0].Status.AgenticRunStatus.Phase == healthcheckrun.PhaseCreated &&
+			records.Items[1].Status.AgenticRunStatus.Phase == healthcheckrun.PhaseCreated {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("timed out waiting for jittered runs: %+v", records.Items)
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+	if records.Items[0].Status.AgenticRunName != records.Items[1].Status.AgenticRunName {
+		t.Fatal("clusters in one interval must share a spoke run name")
+	}
+
+	// Canceling the manager context during a long delay must prevent even
+	// the pending hub record from being created.
+	stopCtx, stop := context.WithCancel(context.Background())
+	if err := createAgenticRunsForClustersWithConfig(ctx, hub, thc, []string{"cluster-a"},
+		"rds-compliance", cfg, time.Hour, time.Hour, stopCtx); err != nil {
+		t.Fatal(err)
+	}
+	stop()
+	select {
+	case <-time.After(20 * time.Millisecond):
+	case <-ctx.Done():
+		t.Fatal("unexpected test context cancellation")
+	}
+	if err := hub.List(ctx, &records); err != nil {
+		t.Fatal(err)
+	}
+	if len(records.Items) != 2 {
+		t.Fatalf("canceled delay created a record: %+v", records.Items)
 	}
 }
