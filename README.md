@@ -1,27 +1,22 @@
 # Telco Anomaly Detection Operator
 
-A Kubernetes operator that monitors telco workloads across Red Hat Advanced Cluster Management (ACM) managed clusters and autonomously triggers AI-driven health investigations using [OpenShift Lightspeed](https://www.redhat.com/en/technologies/cloud-computing/openshift/lightspeed).
+A Kubernetes operator that monitors telco workloads across Red Hat Advanced Cluster Management (ACM) managed clusters and triggers AI-driven health investigations using [OpenShift Lightspeed](https://www.redhat.com/en/technologies/cloud-computing/openshift/lightspeed).
 
 ## Overview
 
-The operator runs on an ACM hub cluster and watches telco spoke clusters for anomalies. When a Thanos alert fires (or on a configurable schedule), it creates an `AgenticRun` resource on the affected spoke cluster so that OpenShift Lightspeed can investigate the issue autonomously and propose remediation steps.
+The operator runs on an ACM hub. It configures Thanos alert rules for monitored clusters; AlertManager sends fired alerts to a webhook. An alert, or an enabled periodic check, creates an `AgenticRun` in `openshift-lightspeed` on the affected spoke. The hub keeps a `TelcoHealthCheckRun` audit record and synchronizes the spoke run's condition and analysis result.
 
 ```
-Spoke clusters                              Hub cluster
-──────────────────────────────              ─────────────────────────────────────────────
- node_exporter / kube-state                 Thanos Receive → Thanos Store
-       │ metrics                                    │
-       ▼                                    Thanos Ruler (evaluates custom alert rules)
- observability-addon                                │ alert fires
-       │ remote_write                       AlertManager
-       └──────────────────────────────►            │ POST /webhook
-                                           Alert Receiver pod
-                                                   │
-                                           Controller pod (periodic)
-                                                   │
-                                           AgenticRun CR on spoke
-                                                   │
-                                           OpenShift Lightspeed investigates
+Spoke metrics → observability-addon → Hub Thanos Ruler → AlertManager
+                                                   │ POST /webhook
+                                                   ▼
+                                            Hub Alert Receiver ──┐
+                                            Hub Controller (RDS) ─┴─► Spoke AgenticRun
+                                                                     │
+                                                                     ▼
+                                                               OpenShift Lightspeed
+
+Spoke AgenticRun + AnalysisResult → Hub Controller watch → Hub TelcoHealthCheckRun
 ```
 
 ## Prerequisites
@@ -30,14 +25,15 @@ Spoke clusters                              Hub cluster
 - ACM Multicluster Observability (MCO) operator deployed
 - OpenShift Lightspeed installed on each monitored spoke cluster
 - ACM `ManagedCluster` resources for spoke clusters, each with an `<name>-admin-kubeconfig` Secret in namespace `<name>`
+- Spoke kubeconfigs with access to create and read `AgenticRun` resources and list/watch `AgenticRun` and `AnalysisResult` resources in `openshift-lightspeed`
 
 ## Components
 
 | Component | Description |
 |---|---|
-| **Controller** | Reconciles `TelcoHealthcheck` CRs; manages Thanos alert rules, AlertManager config, custom metrics collection, and periodic AgenticRun creation |
+| **Controller** | Reconciles the singleton `TelcoHealthcheck`; manages Thanos rules, AlertManager, the MCO metrics allowlist, periodic RDS checks, spoke status watches, and run-record cleanup |
 | **Alert Receiver** | HTTP webhook server (`POST /webhook`) that receives AlertManager payloads and creates AgenticRuns on the affected spoke cluster |
-| **Skills OCI image** | OCI image containing Lightspeed skill definition files, mounted into AgenticRuns to guide the investigation |
+| **Skills OCI image** | OCI image containing Lightspeed skills referenced by the `skills` configuration of individual AgenticRuns |
 
 ## CRD: TelcoHealthcheck
 
@@ -55,7 +51,7 @@ spec:
     exclude:
       - local-cluster
 
-  # Namespaces to monitor on each spoke cluster (required).
+  # Required field; an empty list is allowed.
   managedNamespaces:
     - openshift-sriov-network-operator
     - openshift-ovn-kubernetes
@@ -65,12 +61,23 @@ spec:
     hostNetwork: true      # node-level network drop/error alerts
     podNetwork: true       # pod-level container network error alerts
     hostReservedCPU: false # reserved-CPU overuse alerts
+    ovsProcessCPU: false   # OVS process CPU alerts
+    userAlerts: false      # include labeled user-defined alert ConfigMaps
 
   periodicHealthChecks:
-    period: 6h             # run a health check on every spoke every 6 hours
+    period: 6h             # default interval; 0 disables periodic checks
     rdsCompliance:
-      enabled: false       # RDS compliance check via kube-compare-mcp
+      enabled: false       # enable the currently implemented periodic check
+      # period: 24h        # optional RDS-specific override
+
+  logLevel: info           # info or debug; changes on next reconcile
+  # purgeInterval: 168h   # optional retention for hub run records
 ```
+
+Only RDS compliance currently uses the periodic schedule. Enabling it deploys
+`kube-compare-mcp` in the operator namespace; with a nonzero default period, it
+also creates a run on each monitored spoke when due. The RDS check can override
+the default interval with `rdsCompliance.period`.
 
 ### Alert types
 
@@ -79,6 +86,19 @@ spec:
 | `TelcoHealthCheckHostNetwork` | `alerts.hostNetwork` | Node network receive/transmit drop rate > 1 |
 | `TelcoHealthCheckPodNetwork` | `alerts.podNetwork` | Container network errors or dropped packets > 1 |
 | `TelcoHealthCheckHostReservedCPU` | `alerts.hostReservedCPU` | `openshift:cpu_usage_cores:sum > 3` |
+| `TelcoHealthCheckOVSProcessCPU` | `alerts.ovsProcessCPU` | OVS DB or vswitchd process CPU rate > 1 core |
+
+With `alerts.userAlerts: true`, the controller also includes labeled user-defined alert ConfigMaps in its Thanos rules and MCO metrics allowlist. See [Adding a new alert](docs/adding-a-new-alert.md) for their format. Built-in alerts and the periodic checks are configured from embedded assets in `internal/controller/assets/`; the controller restores their ConfigMap contents on each reconcile. To change a built-in prompt, rule, skill, or MCP server, edit the corresponding asset and rebuild the controller image.
+
+### Run records
+
+Each spoke run has a namespaced `TelcoHealthCheckRun` (`thcr`) audit record on the hub in `telco-healthcheck-system`. Its status tracks the latest AgenticRun condition type and reason (`agenticRunStatus.type` and `.phase`), an AnalysisResult summary, and `agenticRunActionRequired`. The action-required field follows `AnalysisResult.status.actionRequired` while the type is `Analyzed`; any other non-empty type sets it to `"False"`. It is omitted when the type is empty, or while `Analyzed` has no analysis value. Returning to `Analyzed` restores the current AnalysisResult value.
+
+```bash
+oc get thcr -n telco-healthcheck-system
+```
+
+Set `spec.purgeInterval` to remove old records with an hourly CronJob; without it, records are retained until the singleton is deleted. The controller also exposes run and monitored-cluster gauges through the `telco-anomaly-controller-metrics` Service on port 8080 (`GET /metrics`).
 
 ## Getting Started
 
@@ -98,7 +118,10 @@ make build           # compile controller and alert receiver binaries
 
 ```bash
 make container-build REGISTRY=quay.io/youruser
+make container-push REGISTRY=quay.io/youruser
 ```
+
+`REGISTRY` selects the image tags for these commands; the deployment manifests and embedded skill references use `quay.io/javierpena` by default. Update the controller and alert receiver image references in `config/manager/` and any skill image references in `internal/controller/assets/` when using another registry.
 
 ### 4. Deploy to the hub cluster
 
@@ -106,7 +129,7 @@ make container-build REGISTRY=quay.io/youruser
 make deploy
 ```
 
-This applies the CRD, RBAC, and Deployments. The operator runs in the `telco-healthcheck-system` namespace.
+This applies the CRDs, RBAC, validating webhook, Services, and Deployments. The operator runs in `telco-healthcheck-system`. The webhook uses an OpenShift service-CA serving certificate; wait for the controller Deployment to become Ready before creating the singleton CR, because admission fails until the webhook CA bundle is available.
 
 ### 5. Create a TelcoHealthcheck CR
 
@@ -114,16 +137,21 @@ This applies the CRD, RBAC, and Deployments. The operator runs in the `telco-hea
 kubectl apply -f config/samples/ran_v1alpha1_telcohealthcheck.yaml
 ```
 
-### 6. Customise AgenticRun prompts (optional)
+The sample enables host and pod network alerts and host-reserved-CPU alerts; RDS compliance and user-defined alerts are disabled. Adjust the sample for your monitored clusters before applying it.
 
-Each alert type and periodic check reads its Lightspeed prompt and tool configuration from a ConfigMap in `telco-healthcheck-system`. Edit these to provide richer investigation prompts or point to your skill OCI image:
+### 6. Configure AgenticRun investigations (optional)
+
+Each enabled built-in alert and periodic check gets a controller-managed ConfigMap in `telco-healthcheck-system`. Its `request`, `skills`, and `mcpServers` fields supply the Lightspeed prompt and tools. Change the corresponding embedded asset and rebuild/redeploy the controller to update a built-in configuration:
 
 | ConfigMap | Alert / check |
 |---|---|
 | `telco-anomaly-host-network-config` | `TelcoHealthCheckHostNetwork` |
 | `telco-anomaly-pod-network-config` | `TelcoHealthCheckPodNetwork` |
 | `telco-anomaly-host-reserved-cpu-config` | `TelcoHealthCheckHostReservedCPU` |
+| `telco-anomaly-ovs-process-cpu-config` | `TelcoHealthCheckOVSProcessCPU` |
 | `telco-anomaly-rds-compliance-config` | RDS compliance periodic check |
+
+The pod-network built-in currently uses a placeholder `request: "test"`. User-defined alerts can supply their own prompt and tools in their labeled ConfigMap without rebuilding the operator; see [Adding a new alert](docs/adding-a-new-alert.md).
 
 ### 7. Undeploy
 
