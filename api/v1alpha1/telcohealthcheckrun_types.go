@@ -29,6 +29,16 @@ type AgenticRunStatus struct {
 // TelcoHealthCheckRunSpec is empty; this record is managed by the operator.
 type TelcoHealthCheckRunSpec struct{}
 
+// AlertNotification is a durable action-required transition waiting to be
+// delivered to Alertmanager. The summary is captured at transition time.
+type AlertNotification struct {
+	Firing   bool        `json:"firing"`
+	StartsAt metav1.Time `json:"startsAt"`
+	// +optional
+	EndsAt  *metav1.Time `json:"endsAt,omitempty"`
+	Summary string       `json:"summary,omitempty"`
+}
+
 // TelcoHealthCheckRunStatus identifies the spoke run and records its observed result.
 type TelcoHealthCheckRunStatus struct {
 	AgenticRunName string      `json:"agenticRunName"`
@@ -44,6 +54,15 @@ type TelcoHealthCheckRunStatus struct {
 	// +optional
 	// +kubebuilder:validation:Enum=True;False
 	AgenticRunActionRequired string `json:"agenticRunActionRequired,omitempty"`
+	// AlertNotifications is the ordered, durable delivery queue for transitions.
+	// +optional
+	AlertNotifications []AlertNotification `json:"alertNotifications,omitempty"`
+	// AlertStartsAt identifies the current firing period, including renewals.
+	// +optional
+	AlertStartsAt *metav1.Time `json:"alertStartsAt,omitempty"`
+	// LastAlertSentTime records the last successful firing delivery or renewal.
+	// +optional
+	LastAlertSentTime *metav1.Time `json:"lastAlertSentTime,omitempty"`
 }
 
 // +kubebuilder:object:root=true

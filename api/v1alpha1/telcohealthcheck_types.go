@@ -61,8 +61,45 @@ type PeriodicHealthChecksSpec struct {
 	RDSCompliance RDSComplianceSpec `json:"rdsCompliance,omitempty"`
 }
 
+// AlertManagerAuthType selects how the controller authenticates to an external Alertmanager.
+// +kubebuilder:validation:Enum=none;bearer;basic
+type AlertManagerAuthType string
+
+const (
+	AlertManagerAuthNone   AlertManagerAuthType = "none"
+	AlertManagerAuthBearer AlertManagerAuthType = "bearer"
+	AlertManagerAuthBasic  AlertManagerAuthType = "basic"
+)
+
+// AlertManagerCredentialsSecret identifies a Secret in the operator namespace.
+type AlertManagerCredentialsSecret struct {
+	// Name is the Secret name. Bearer authentication reads its token key;
+	// basic authentication reads its username and password keys.
+	// +kubebuilder:validation:MinLength=1
+	Name string `json:"name"`
+}
+
+// AlertManagerSpec configures outgoing action-required alerts.
+// +kubebuilder:validation:XValidation:rule="( !has(self.authType) || self.authType == 'none') == !has(self.credentialsSecret)",message="credentialsSecret is required for bearer and basic auth, and must be omitted for none"
+type AlertManagerSpec struct {
+	// URL is the base URL of the external Alertmanager.
+	// +kubebuilder:validation:MinLength=1
+	URL string `json:"url"`
+	// AuthType defaults to none when omitted.
+	// +optional
+	// +kubebuilder:default=none
+	AuthType AlertManagerAuthType `json:"authType,omitempty"`
+	// CredentialsSecret references a Secret in the operator namespace.
+	// +optional
+	CredentialsSecret *AlertManagerCredentialsSecret `json:"credentialsSecret,omitempty"`
+}
+
 // TelcoHealthcheckSpec defines the desired state of TelcoHealthcheck.
 type TelcoHealthcheckSpec struct {
+	// AlertManager configures an external Alertmanager. When omitted, run
+	// action-required alerts are not sent.
+	// +optional
+	AlertManager *AlertManagerSpec `json:"alertManager,omitempty"`
 	// ManagedClusters selects which ACM ManagedCluster resources are monitored.
 	ManagedClusters ManagedClustersSpec `json:"managedClusters"`
 	// ManagedNamespaces lists the namespaces to monitor on each managed cluster.

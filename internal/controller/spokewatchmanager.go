@@ -299,10 +299,49 @@ func (m *SpokeWatchManager) updateMatchingRecordsLocked(ctx context.Context, clu
 			if reflect.DeepEqual(current.Status, before.Status) {
 				return nil
 			}
+			queueActionAlert(&current.Status, before.Status)
 			return m.hub.Status().Patch(ctx, current, client.MergeFromWithOptions(before, client.MergeFromWithOptimisticLock{}))
 		}); err != nil {
 			log.FromContext(ctx).Error(err, "syncing hub run status", "record", key)
 		}
+	}
+}
+
+// queueActionAlert persists the delivery intent in the same status patch as
+// the action change. Replayed watch events do not queue duplicate notifications.
+func queueActionAlert(status *ranv1alpha1.TelcoHealthCheckRunStatus, previous ranv1alpha1.TelcoHealthCheckRunStatus) {
+	oldAction, newAction := previous.AgenticRunActionRequired, status.AgenticRunActionRequired
+	if oldAction == newAction {
+		return
+	}
+	// metav1.Time is serialized at second precision in Kubernetes status.
+	// Compare and persist times at the same precision for valid alert ranges.
+	now := metav1.NewTime(time.Now().UTC().Truncate(time.Second))
+	summary := ""
+	if status.AgenticRunStatus != nil {
+		summary = status.AgenticRunStatus.Summary
+	}
+	if newAction == "True" {
+		status.AlertStartsAt = &now
+		status.LastAlertSentTime = nil
+		status.AlertNotifications = append(status.AlertNotifications, ranv1alpha1.AlertNotification{
+			Firing: true, StartsAt: now, Summary: summary,
+		})
+	} else if oldAction == "True" {
+		startsAt := now
+		if status.AlertStartsAt != nil {
+			startsAt = *status.AlertStartsAt
+		}
+		// Alertmanager requires endsAt after startsAt. Both metav1 timestamps
+		// are second-precision, even if the transitions occur milliseconds apart.
+		if !now.After(startsAt.Time) {
+			now = metav1.NewTime(startsAt.Add(time.Second))
+		}
+		status.AlertNotifications = append(status.AlertNotifications, ranv1alpha1.AlertNotification{
+			StartsAt: startsAt, EndsAt: &now, Summary: summary,
+		})
+		status.AlertStartsAt = nil
+		status.LastAlertSentTime = nil
 	}
 }
 

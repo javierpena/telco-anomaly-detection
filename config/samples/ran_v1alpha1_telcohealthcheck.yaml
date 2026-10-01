@@ -23,6 +23,13 @@ spec:
     # Enable user-defined alerts
     userAlerts: false
 
+  # Optional external Alertmanager for action-required run alerts.
+  # alertManager:
+  #   url: https://alertmanager.example.com
+  #   authType: bearer  # none (default), bearer, or basic
+  #   credentialsSecret:
+  #     name: alertmanager-credentials  # Secret in telco-healthcheck-system
+
   periodicHealthChecks:
     # Run a general health check on every spoke every 6 hours.
     period: 6h

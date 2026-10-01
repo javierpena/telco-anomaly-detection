@@ -49,6 +49,43 @@ spec:
           spec:
             description: TelcoHealthcheckSpec defines the desired state of TelcoHealthcheck.
             properties:
+              alertManager:
+                description: |-
+                  AlertManager configures an external Alertmanager. When omitted, run
+                  action-required alerts are not sent.
+                properties:
+                  authType:
+                    default: none
+                    description: AuthType defaults to none when omitted.
+                    enum:
+                    - none
+                    - bearer
+                    - basic
+                    type: string
+                  credentialsSecret:
+                    description: CredentialsSecret references a Secret in the operator
+                      namespace.
+                    properties:
+                      name:
+                        description: |-
+                          Name is the Secret name. Bearer authentication reads its token key;
+                          basic authentication reads its username and password keys.
+                        minLength: 1
+                        type: string
+                    required:
+                    - name
+                    type: object
+                  url:
+                    description: URL is the base URL of the external Alertmanager.
+                    minLength: 1
+                    type: string
+                required:
+                - url
+                type: object
+                x-kubernetes-validations:
+                - message: credentialsSecret is required for bearer and basic auth,
+                    and must be omitted for none
+                  rule: ( !has(self.authType) || self.authType == 'none') == !has(self.credentialsSecret)
               alerts:
                 description: Alerts controls which alert categories create Thanos
                   rules and trigger agentic runs.

@@ -95,7 +95,40 @@ spec:
                     description: Type is taken from the latest AgenticRun condition.
                     type: string
                 type: object
+              alertNotifications:
+                description: AlertNotifications is the ordered, durable delivery queue
+                  for transitions.
+                items:
+                  description: |-
+                    AlertNotification is a durable action-required transition waiting to be
+                    delivered to Alertmanager. The summary is captured at transition time.
+                  properties:
+                    endsAt:
+                      format: date-time
+                      type: string
+                    firing:
+                      type: boolean
+                    startsAt:
+                      format: date-time
+                      type: string
+                    summary:
+                      type: string
+                  required:
+                  - firing
+                  - startsAt
+                  type: object
+                type: array
+              alertStartsAt:
+                description: AlertStartsAt identifies the current firing period, including
+                  renewals.
+                format: date-time
+                type: string
               clusterName:
+                type: string
+              lastAlertSentTime:
+                description: LastAlertSentTime records the last successful firing
+                  delivery or renewal.
+                format: date-time
                 type: string
               trigger:
                 type: string

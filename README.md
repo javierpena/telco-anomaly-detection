@@ -64,6 +64,13 @@ spec:
     ovsProcessCPU: false   # OVS process CPU alerts
     userAlerts: false      # include labeled user-defined alert ConfigMaps
 
+  # Optional: send action-required run alerts to an external Alertmanager.
+  # alertManager:
+  #   url: https://alertmanager.example.com
+  #   authType: bearer     # none (default), bearer, or basic
+  #   credentialsSecret:
+  #     name: alertmanager-credentials
+
   periodicHealthChecks:
     period: 6h             # default interval; 0 disables periodic checks
     rdsCompliance:
@@ -99,6 +106,18 @@ oc get thcr -n telco-healthcheck-system
 ```
 
 Set `spec.purgeInterval` to remove old records with an hourly CronJob; without it, records are retained until the singleton is deleted. The controller also exposes run and monitored-cluster gauges through the `telco-anomaly-controller-metrics` Service on port 8080 (`GET /metrics`).
+
+### External Alertmanager (optional)
+
+Set `spec.alertManager.url` to the external Alertmanager **base URL** to send `TelcoActionRequired` alerts when a run's `agenticRunActionRequired` becomes `"True"`. The operator sends a resolution when it changes from `"True"` to `"False"` or becomes unset, and renews alerts while action remains required. If `alertManager` is omitted, no run alerts are sent. This destination is separate from the ACM AlertManager that sends incoming alerts to the operator.
+
+`authType` defaults to `none`. For `bearer` or `basic`, set `credentialsSecret.name` to a Secret in `telco-healthcheck-system`; authenticated URLs must use HTTPS. Bearer auth reads the Secret's `token` key; basic auth reads its `username` and `password` keys. For example, create a bearer-token Secret before setting the field:
+
+```bash
+kubectl -n telco-healthcheck-system create secret generic alertmanager-credentials --from-file=token=/path/to/token
+```
+
+For basic auth, create the Secret with `--from-file=username=/path/to/username --from-file=password=/path/to/password` instead. The operator reads credentials for each delivery, so Secret rotation takes effect without restarting it. Failed deliveries remain queued for retry. Alerts include the run's cluster, summary, and AgenticRun name; when available, their URL links to the spoke console using the `ManagedCluster` console URL claim. See [architecture](docs/architecture.md#external-action-required-alerts) for delivery details.
 
 ## Getting Started
 

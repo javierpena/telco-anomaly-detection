@@ -206,7 +206,7 @@ func TestActionRequiredFollowsRunType(t *testing.T) {
 		}}
 		m.handleRun(ctx, cluster, dyn, run)
 	}
-	check := func(want string) {
+	check := func(want string, notifications int) {
 		t.Helper()
 		current := &ranv1alpha1.TelcoHealthCheckRun{}
 		if err := hub.Get(ctx, client.ObjectKeyFromObject(record), current); err != nil {
@@ -215,33 +215,36 @@ func TestActionRequiredFollowsRunType(t *testing.T) {
 		if current.Status.AgenticRunActionRequired != want {
 			t.Fatalf("actionRequired = %q, want %q", current.Status.AgenticRunActionRequired, want)
 		}
+		if len(current.Status.AlertNotifications) != notifications {
+			t.Fatalf("durable transitions = %d, want %d", len(current.Status.AlertNotifications), notifications)
+		}
 	}
 
 	if _, err := dyn.Resource(analysisResultGVR).Namespace(agenticrun.Namespace).Create(ctx, analysis, metav1.CreateOptions{}); err != nil {
 		t.Fatal(err)
 	}
 	m.handleResult(ctx, cluster, analysis)
-	check("") // No type yet; analysis cannot assert action required.
+	check("", 0) // No type yet; analysis cannot assert action required.
 	setType("Analyzed")
-	check("True")
+	check("True", 1)
 	setType("Executing")
-	check("False")
+	check("False", 2)
 	m.handleResult(ctx, cluster, analysis)
-	check("False")
+	check("False", 2)
 	setType("Analyzed") // No new result event; recover the stored analysis.
-	check("True")
+	check("True", 3)
 	analysis.Object["status"].(map[string]interface{})["actionRequired"] = "False"
 	m.handleResult(ctx, cluster, analysis)
-	check("False")
+	check("False", 4)
 	setType("Complete")
-	check("False")
+	check("False", 4)
 	if _, err := dyn.Resource(analysisResultGVR).Namespace(agenticrun.Namespace).Update(ctx, analysis, metav1.UpdateOptions{}); err != nil {
 		t.Fatal(err)
 	}
 	setType("Analyzed")
-	check("False") // Re-entry uses the current analysis, not a prior True.
+	check("False", 4) // Re-entry uses the current analysis, not a prior True.
 	setType("")
-	check("")
+	check("", 4)
 }
 
 func TestRunTypeBeforeAnalysis(t *testing.T) {

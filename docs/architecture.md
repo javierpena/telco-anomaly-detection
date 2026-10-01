@@ -160,6 +160,9 @@ The receiver validates `labels.alertname` against the Thanos rules it wrote itse
 | `alerts.hostReservedCPU` | `bool` | Enable the `TelcoHealthCheckHostReservedCPU` Thanos rule. |
 | `alerts.ovsProcessCPU` | `bool` | Enable the `TelcoHealthCheckOVSProcessCPU` Thanos rule. |
 | `alerts.userAlerts` | `bool` | Enable discovery of user-defined alert ConfigMaps. See **User-defined alert ConfigMaps** below. |
+| `alertManager.url` | URL (optional `alertManager` object) | Base URL of the external Alertmanager receiving action-required run alerts at `/api/v2/alerts`. When the object is absent, no run alerts are sent. |
+| `alertManager.authType` | `none\|bearer\|basic` | Authentication method. Defaults to `none` when omitted. |
+| `alertManager.credentialsSecret.name` | `string` | Secret name in the operator namespace. Required for `bearer` and `basic`; omitted for `none`. |
 | `periodicHealthChecks.period` | `duration` | Default interval between periodic checks. Zero disables all periodic checks. |
 | `periodicHealthChecks.rdsCompliance.enabled` | `bool` | Activate the RDS compliance periodic check. |
 | `periodicHealthChecks.rdsCompliance.period` | `duration` | Override interval for the RDS compliance check. |
@@ -424,6 +427,43 @@ status patches so a late analysis event cannot restore `"True"` after the type
 has moved away from `Analyzed`.
 Removing a cluster leaves its historical records with their last observed
 status.
+
+### External action-required alerts
+
+When `spec.alertManager` is set, the controller sends `TelcoActionRequired`
+alerts to the external Alertmanager's `/api/v2/alerts` API under
+`spec.alertManager.url`. `authType` defaults to `none`; with `bearer`, the
+controller reads the `token` key of `credentialsSecret.name` in the operator
+namespace and sends `Authorization: Bearer <token>`. With `basic`, it reads
+the `username` and `password` keys and uses HTTP Basic authentication.
+Credentials are read for each delivery, so Secret rotation takes effect
+without restarting; changes to the referenced Secret also requeue run
+records for delivery. Authenticated endpoints must use HTTPS and redirects
+are not followed. Missing or invalid credentials leave notifications queued
+for retry; credential values are not stored in run records or logs.
+
+In the same status patch that changes `agenticRunActionRequired`, the spoke
+watcher appends a durable `status.alertNotifications` event: firing when the
+value becomes `"True"`, resolved when it moves from `"True"` to `"False"` or is removed.
+Each event captures the transition time and summary. A dedicated run-record
+controller replays queued events after restarts, retries failed requests, and
+acknowledges successful delivery in run status. Replays use the same `startsAt`
+and labels so retries are idempotent. A record that remains `"True"` is renewed
+every minute with `endsAt` five minutes in the future; resolution sends the
+original `startsAt` and the transition's `endsAt`. Alertmanager derives
+`firing` and `resolved` from these timestamps (the alerts API has no writable
+`status` field). Removing `spec.alertManager` stops delivery and clears pending
+events; enabling it again notifies any records still requiring action.
+
+Each alert has labels `alertname=TelcoActionRequired`, `severity=warning`,
+`cluster`, and `agentic_run`; the latter two distinguish simultaneous runs.
+Annotations are `cluster`, `summary`, `agentic_run`, and, when available, `url`.
+The URL comes from the matching hub `ManagedCluster`'s
+`status.clusterClaims[consoleurl.cluster.open-cluster-management.io]` value,
+followed by `/lightspeed/runs/openshift-lightspeed/<AgenticRun name>`.
+If the claim cannot be read, the URL annotation is omitted. This outgoing
+Alertmanager is separate from the ACM Alertmanager webhook receiver used to
+trigger incoming health checks.
 
 When `purgeInterval` is set, an hourly `batch/v1` CronJob uses the existing
 `telco-anomaly-operator` ServiceAccount to remove records past that age.

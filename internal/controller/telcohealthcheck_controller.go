@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"strings"
 	"time"
 
@@ -344,6 +345,12 @@ func (r *TelcoHealthcheckReconciler) alertReceiverURL() string {
 func (r *TelcoHealthcheckReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	r.SpokeWatches = newSpokeWatchManager(mgr.GetClient(), mgr.GetAPIReader(), r.OperatorNamespace)
 	if err := mgr.Add(r.SpokeWatches); err != nil {
+		return err
+	}
+	if err := (&runAlertReconciler{
+		Client: mgr.GetClient(), reader: mgr.GetAPIReader(), namespace: r.OperatorNamespace,
+		http: &http.Client{Timeout: 10 * time.Second},
+	}).SetupWithManager(mgr); err != nil {
 		return err
 	}
 	return ctrl.NewControllerManagedBy(mgr).
