@@ -1,6 +1,6 @@
 ---
 name: check-sriov-pod-network-health
-description: Run a complete health check of the network for an OpenShift pod that uses SR-IOV. Use when user wants to troubleshoot or check the health of a pod running workloads that use SR-IOV.
+description: Run a complete health check of the network configuration for an OpenShift pod that uses SR-IOV. Use when user wants to troubleshoot or check the health of a pod running workloads that use SR-IOV.
 ---
 
 
@@ -13,13 +13,14 @@ description: Run a complete health check of the network for an OpenShift pod tha
 
 ## Rules
 
-- Always use the MCP tools at your disposal
-- NEVER try to run any commands outside of MCP tool calls
-- You will focus the analysis on pod $ARGUMENTS[0] from namespace $ARGUMENTS[1]
+- NEVER try to do any change of the current configuration
+- You will focus the analysis on pods from namespace $ARGUMENTS[0]
 
 ## Prerequisite: Gather pod and node identity
 
-Before starting any checks, retrieve the pod definition for pod $ARGUMENTS[0] in namespace $ARGUMENTS[1] and record the following for use in all subsequent steps:
+As a pre-requisite, find any pods using SR-IOV on the namedpace $ARGUMENTS[0]. Refer to `references/find-sriov-pods.md` for detailed instructions.
+
+For each of the SR-IOV pods, retrieve the pod definition and record the following for use in all subsequent steps:
 - The name of the node the pod is running on (field `spec.nodeName`). Refer to this as NODE_NAME throughout the rest of the analysis.
 - The containerID of the pod's main container. Refer to this as CONTAINER_ID.
 - The PerformanceProfile resource from the cluster that applies to NODE_NAME. Refer to this as PERFORMANCE_PROFILE.
@@ -35,10 +36,9 @@ Before starting any checks, retrieve the pod definition for pod $ARGUMENTS[0] in
     - cpu-load-balancing.crio.io: disable
     - cpu-quota.crio.io: disable
     - irq-load-balancing.crio.io: disable
-2. Make sure the the pod's CPU utilization is above 90%.
-3. Make sure the pod's containers are not being throttled by the CFS. Use the following Prometheus query, replacing `<pod>` and `<namespace>` with the pod name and namespace: `rate(container_cpu_cfs_throttled_periods_total{pod="<pod>", namespace="<namespace>"}[5m]) / rate(container_cpu_cfs_periods_total{pod="<pod>", namespace="<namespace>"}[5m])`. A value above 0.25 (25%) indicates significant throttling.
-4. Make sure the QoS class for the pod is Guaranteed.
-5. Find the node CPUs assigned to the pod using CONTAINER_ID. Refer to `references/find-cpus-for-pod.md` for detailed instructions. Record the resulting CPU list as POD_CPUS for use in Steps 3 and 4.
+2. Make sure the pod's containers are not being throttled by the CFS. Use the following Prometheus query, replacing `<pod>` and `<namespace>` with the pod name and namespace: `rate(container_cpu_cfs_throttled_periods_total{pod="<pod>", namespace="<namespace>"}[5m]) / rate(container_cpu_cfs_periods_total{pod="<pod>", namespace="<namespace>"}[5m])`. A value above 0.25 (25%) indicates significant throttling.
+3. Make sure the QoS class for the pod is Guaranteed.
+4. Find the node CPUs assigned to the pod using CONTAINER_ID. Refer to `references/find-cpus-for-pod.md` for detailed instructions. Record the resulting CPU list as POD_CPUS for use in Steps 3 and 4.
 
 ## Step 3: Check OpenShift node network configuration
 
@@ -66,4 +66,4 @@ Run the following steps ONLY if SRIOV_TYPE is kernel.
 
 ## Step 6: Final report
 
-Report status of each of the checks, providing a summary of the next steps.
+Report status of the checks on each pod.
