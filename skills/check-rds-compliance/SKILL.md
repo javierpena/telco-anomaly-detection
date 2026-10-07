@@ -1,26 +1,14 @@
 ---
 name: check-rds-compliance
-description: Run a compliance check against the Telco RAN Reference Design Specification for this cluster. Use when user wants to verify if the cluster configuration complies with the requirements of the Telco RAN RDS.
+description: Validate a named managed cluster against the Telco RAN Reference Design Specification using kube-compare MCP.
 ---
 
 # Check RAN RDS Compliance
 
-## When to Use
+## Verify
 
-- Use this skill when you need to verify the cluster configuration against the RAN RDS
-- This skill is helpful to identify any deviations from the Reference Design Specification
+Take the managed (spoke) cluster name from the request; if absent, obtain it before validating. The MCP server runs on the ACM hub: call `kube_compare_validate_rds` with `managed_cluster` set to that **spoke** name, not the hub. Do not change cluster resources.
 
-## Rules
+## Report
 
-- Use available MCP tools whenever possible
-- The MCP server is running remotely on an ACM hub cluster. Make sure you pass the `managed_cluster` parameter to the tool calls supporting it, to reference the cluster being checked
-
-## Step 1: Verify RDS compliance
-
-1. Get the cluster name to be checked for RDS compliance.
-2. Use the `kube_compare_validate_rds` tool to verify RDS compliance against the RAN specification. Make sure the `managed_cluster` parameter is included.
-
-## Step 2: Analyze data and generate report
-
-Report on all deviations found, displayed as `ValidationIssues` in the tool output. For all deviations marked as `required`, propose a fix to remediate them.
-
+Report every `ValidationIssue` returned, with its requirement level and evidence. For `required` deviations, propose a specific remediation without applying it. If the tool fails, returns incomplete results, or the cluster cannot be identified, report **unable to verify** and the reason; do not describe an incomplete run as compliant. Only report compliance when validation completes and no issues are returned.

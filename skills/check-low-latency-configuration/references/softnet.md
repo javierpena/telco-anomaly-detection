@@ -2,6 +2,6 @@
 
 ## Instructions
 
-- Read file `/host/proc/net/softnet_stat` from the node running the pod, connect using `oc debug`.
-- The file contains per-CPU statistics. Column 2 shows drops, Column 3 shows time squeezes (time out of quota), encoded in hexadecimal.
-- Any non-zero value in the drops column is a problem. A time_squeeze value that is non-zero and increasing over time indicates the CPU cannot keep up with network traffic and may cause latency spikes.
+- Read `/host/proc/net/softnet_stat` twice on the **same assessed node** using `oc debug node/<node>`; note the sampling interval.
+- Rows are per CPU. Hexadecimal columns 2 and 3 are cumulative drops and time_squeeze counts. Convert to numbers and compare deltas for the same CPU; a nonzero historical total is not evidence of a current issue.
+- Flag increasing drops or sustained time_squeeze increases on the measured CPUs, recording CPU, delta and interval. If only one snapshot is available, report the totals without concluding current contention.

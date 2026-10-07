@@ -2,6 +2,8 @@
 
 ## Instructions
 
--  Read the values of `/host/proc/sys/net/ipv4/tcp_rmem` and `/host/proc/sys/net/ipv4/tcp_wmem` from the node running the pod, using `oc debug`. The highest value from each file should be at least:
+- Read `/host/proc/sys/net/ipv4/tcp_rmem` and `/host/proc/sys/net/ipv4/tcp_wmem` on **each assessed node** using `oc debug node/<node>`. Each file contains three values; compare the third (maximum) value with this guideline:
     - /host/proc/sys/net/ipv4/tcp_rmem: 4194304
     - /host/proc/sys/net/ipv4/tcp_wmem: 4194304
+
+Report the actual maximums and whether they meet the guideline; these settings alone do not establish overall low-latency readiness.

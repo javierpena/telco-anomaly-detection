@@ -2,11 +2,10 @@
 
 ## Instructions
 
-The most effective way to find the CPU usage of certain cores in an OpenShift cluster is to run a Prometheus query. The following query will provide the CPU usage for all CPUs over the last 15 minutes:
+Use the reserved CPU list from the PerformanceProfile matched to the node. Query CPU usage over 15 minutes while preserving the node's `instance` label (map it to the Kubernetes node; it may not equal the node name):
 
 ```
-(sum by (cpu)(rate(node_cpu_seconds_total{mode!="idle"}[15m]))*100)
+100 * (1 - rate(node_cpu_seconds_total{mode="idle",instance="<node-instance>"}[15m]))
 ```
 
-Now filter for the CPUs listed as reserved in the Performance Profile resource.
-
+Inspect only that node's reserved CPU IDs. Never aggregate CPU ID 0 (or any other ID) across nodes. Record the value and interval; without a stated threshold or baseline, report utilization rather than labeling it high solely from a single sample.

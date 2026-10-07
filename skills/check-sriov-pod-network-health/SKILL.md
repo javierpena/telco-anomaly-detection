@@ -1,59 +1,44 @@
 ---
 name: check-sriov-pod-network-health
-description: Run a complete health check of the network configuration for an OpenShift pod that uses SR-IOV. Use when user wants to troubleshoot or check the health of a pod running workloads that use SR-IOV.
+description: Diagnose OpenShift SR-IOV pod networking and CPU/IRQ placement, correlating each pod VF with its node PF.
 ---
 
 
 # Check SR-IOV pod network health
 
-## When to Use
+## Scope and rules
 
-- Use this skill when you need to check the configuration of an OpenShift pod using SR-IOV, to achieve high performance
-- This skill is helpful to verify the configuration of the OpenShift cluster, nodes and pod to obtain high SR-IOV network performance
+- Use the namespace (and optional pod name) supplied in the request. If the namespace is missing, ask for it before querying pods. Analyze only pods in that namespace; never change cluster configuration.
+- Record findings per pod **and per attached VF** as **pass**, **deviation**, or **unable to verify**. Do not treat missing telemetry as a pass.
 
-## Rules
+## 1. Identify pods, containers, and VFs
 
-- NEVER try to do any change of the current configuration
-- You will focus the analysis on pods from namespace $ARGUMENTS[0]
+Find SR-IOV pods as described in `references/find-sriov-pods.md`. For each running pod, record `spec.nodeName`, container IDs from `status.containerStatuses`, and the PCI address of each attached SR-IOV VF from the pod's network status. If the pod has no node or running container, report the blocked checks instead of guessing. Fetch the node's SriovNetworkNodeState **once** and map each VF to its PF and VF group using `references/find-physical-nic-for-sriov-pod.md`. Determine kernel versus userspace handling **per VF** using `references/detect-sriov-type.md`.
 
-## Prerequisite: Gather pod and node identity
-
-As a pre-requisite, find any pods using SR-IOV on the namedpace $ARGUMENTS[0]. Refer to `references/find-sriov-pods.md` for detailed instructions.
-
-For each of the SR-IOV pods, retrieve the pod definition and record the following for use in all subsequent steps:
-- The name of the node the pod is running on (field `spec.nodeName`). Refer to this as NODE_NAME throughout the rest of the analysis.
-- The containerID of the pod's main container. Refer to this as CONTAINER_ID.
-
-## Step 1: Check pod configuration
+## 2. Check pod configuration
 
 1. Make sure the following annotations, including their required values, are included in the pod definition:
     - cpu-load-balancing.crio.io: disable
     - cpu-quota.crio.io: disable
     - irq-load-balancing.crio.io: disable
-2. Make sure the pod's containers are not being throttled by the CFS. Use the following Prometheus query, replacing `<pod>` and `<namespace>` with the pod name and namespace: `rate(container_cpu_cfs_throttled_periods_total{pod="<pod>", namespace="<namespace>"}[5m]) / rate(container_cpu_cfs_periods_total{pod="<pod>", namespace="<namespace>"}[5m])`. A value above 0.25 (25%) indicates significant throttling.
+2. Check CFS throttling per container over five minutes: `rate(container_cpu_cfs_throttled_periods_total{pod="<pod>",namespace="<namespace>",container="<container>"}[5m]) / rate(container_cpu_cfs_periods_total{pod="<pod>",namespace="<namespace>",container="<container>"}[5m])`. A ratio above 0.25 indicates significant throttling; if the denominator is zero or the metric is absent, mark it unable to verify. Do not add ratios across containers.
 3. Make sure the QoS class for the pod is Guaranteed.
-4. Find the node CPUs assigned to the pod using CONTAINER_ID. Refer to `references/find-cpus-for-pod.md` for detailed instructions. Record the resulting CPU list as POD_CPUS for use in Steps 3 and 4.
+4. Find assigned CPUs for each relevant container ID using `references/find-cpus-for-pod.md`. Record CPUs per container for the placement checks below.
 
-## Step 2: Check OpenShift node network configuration
+## 3. Check node and VF networking
 
-1. Find the physical NICs used by the SR-IOV VFs associated to the pod on NODE_NAME. Refer to `references/find-physical-nic-for-sriov-pod.md` for detailed instructions. Record the physical NIC names as PF_NICS and the VF interface names as VF_NICS for use in subsequent checks.
-2. Determine if the pod is using kernel or DPDK for SR-IOV. Refer to `references/detect-sriov-type.md` for detailed instructions. Record the SR-IOV type as SRIOV_TYPE for use in subsequent checks.
-3. Check the MTU for all physical NICs used by the SR-IOV VFs associated to the pod. They must be 1500 or higher.
-4. Check the MTU for all SR-IOV VFs associated to the pod. They must be 1500 or higher.
-5. Make sure there are no errors or packet drops shown for any physical NICs used by the SR-IOV VFs associated to the pod. Refer to `references/nic-errors-packet-drops.md` for detailed instructions.
+1. For each mapped VF, check its PF MTU and, where exposed, VF MTU; flag values below 1500. A VF bound to `vfio-pci` may have no host netdevice name: report its MTU as unable to verify unless it can be read from the pod or device tooling.
+2. Check PF drops and errors using `references/nic-errors-packet-drops.md`. Attribute counters to the correct node/PF and distinguish historical totals from current increases.
 
-## Step 3: Check OpenShift kernel node networking configuration (optional, only if SRIOV_TYPE is kernel)
+## 4. Check kernel-networked VFs only
 
-Run the following steps ONLY if SRIOV_TYPE is kernel.
+For PFs associated with kernel-networked VFs, inspect the **current** combined-channel count and hardware maximum with `ethtool -l`; compare the current value with the workload's expected channel count (the original guideline is at least 16), and report unsupported or unavailable values separately. Compare **per-queue packet deltas** across active queues over the same interval rather than lifetime totals; avoid a 20% imbalance judgment when traffic is too low or queues are intentionally inactive. Skip these checks for userspace-bound VFs.
 
-1. Check the combined channels for the physical NICs used by the SR-IOV VFs associated to the pod. The number of combined channels must be at least 16 for each NIC.
-2. Check the statistics for all physical NICs in PF_NICS. You can use `ethtool` to get that information. For each NIC, compare the tx_queue_*_packets and rx_queue_*_packets counters across all queues. If the highest queue count exceeds the lowest by more than 20%, the traffic distribution is imbalanced and should be flagged.
+## 5. Check CPU and IRQ placement
 
-## Step 4: Check low-level OpenShift node configuration
+1. For the assigned CPUs on the pod's node, identify competing processes/threads; distinguish a kernel thread bound to its own CPU from unrelated workload on an isolated CPU.
+2. Inspect network IRQ effective affinities and match them to the assigned isolated CPUs. Flag network IRQs allowed on those CPUs; reserved CPUs may handle these IRQs.
 
-1. Check which processes are running on POD_CPUS on NODE_NAME. If there is any kernel process running on those CPUs, ensure it is a per-cpu kernel thread and not any other type of process.
-2. Check the IRQs allowed to run on POD_CPUS on NODE_NAME. No IRQ related to a network driver should be allowed to run on the isolated CPUs used by the pod. It is ok to have those IRQs running on the system's reserved CPUs.
+## 6. Report
 
-## Step 5: Final report
-
-Report status of the checks on each pod.
+For each pod, list its node, containers/CPUs, each VF PCI address → PF → handling mode, observed values and intervals, and checks that could not be verified. Recommend fixes only for supported deviations.

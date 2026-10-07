@@ -1,47 +1,35 @@
 ---
 name: check-reserved-cpu-usage
-description: Run a complete health check of the reserved CPUs on an OpenShift node. Use when user wants to troubleshoot potential high reserved CPU usage on an OpenShift cluster or node.
+description: Diagnose high usage of reserved CPUs on OpenShift nodes using node-scoped metrics and workload and interrupt evidence.
 ---
 
 
 # Check OpenShift reserved CPU usage
 
-## When to Use
+## Scope and rules
 
-- Use this skill when you need to check the CPU usage on the reserved CPUs of an pod node
-- This skill is helpful to identify reserved CPUs, check their usage, and verify any cause for high CPU usage on those CPUs
+- Investigate the node named in the alert or request; if none is given, identify the affected nodes before expanding to the cluster. Use read-only `oc`/`kubectl` and metrics queries.
+- Report each finding as **pass**, **deviation**, or **unable to verify**; do not infer that a past alert was transient from one current sample.
 
-## Rules
+## 1. Identify reserved CPUs
 
-- Use standard Kubernetes `kubectl` or OpenShift `oc` client commands whenever possible
+List PerformanceProfiles once. Match each `spec.nodeSelector` to node labels and record `spec.cpu.reserved` per matching node. Do not combine CPU IDs from different nodes. If no profile applies, inspect the node's effective CPU reservation (for example its kubelet configuration); `systemd.cpu_affinity` alone does not establish the reserved CPU set. If the reservation cannot be verified, report that and avoid claims about reserved-CPU utilization.
 
-## Prerequisite: Identify reserved CPUs for each cluster node
+## 2. Measure usage on the affected node
 
-Before starting any checks, identify the reserved CPUs for each cluster node. Follow these steps:
+Use a five-minute per-CPU query that retains node identity (adjust the `instance` selector to the metric labels in this environment):
 
-1. List the PerformanceProfile resources in the cluster. For each PerformanceProfile, record the `spec.nodeSelector` and `spec.cpu.reserved` values as NODE_SELECTOR and RESERVED_CPUS respectively.
-2. For each cluster node, check if they match the NODE_SELECTOR value. If so, the associated RESERVED_CPUS value applies to it the node.
-
-If the PerformanceProfile resource is not available, check the node's boot command line parameters, and find the reserved CPU list from `systemd.cpu_affinity`. Record it as RESERVED_CPUS.
-
-## Step 1: Verify CPU usage for reserved CPUs
-
-For each reserved CPU on a cluster node, check if its usage over the last 5 minutes is above 90%. The following query will provide the CPU usage for all CPUs over the last 5 minutes:
-
-```
-(sum by (cpu)(rate(node_cpu_seconds_total{mode!="idle"}[5m]))*100)
+```promql
+100 * (1 - rate(node_cpu_seconds_total{mode="idle",instance="<node-instance>"}[5m]))
 ```
 
-Now filter for the CPUs listed as reserved in the Performance Profile resource. If the CPU usage is below 90%, discard the alert as a transient issue, notify the user and stop the verification.
+Match `<node-instance>` to the affected node; do not assume it equals the Kubernetes node name. Check **each reserved CPU** against 90%, recording the CPU ID, value, node, and observation time. If none currently exceeds 90%, report current usage and, if available, compare with the alert's firing interval before describing it as resolved or transient. Continue with cause checks when an alert is still firing or other evidence warrants it.
 
-## Step 2: Check for pods with high CPU usage, running on reserved CPUs
+## 3. Investigate contributors on affected nodes
 
-Find all pods using a `target.workload.openshift.io/management` annotation. These pods are running on the reserved CPUs. For those pods, check their CPU usage over the last 5 minutes, and identify any pod with a high CPU usage.
+- Look for pods with `target.workload.openshift.io/management` and compare their five-minute CPU usage on the same node. The annotation identifies candidates, not proof of CPU placement; confirm their assigned CPUs when attributing usage. Include host processes if pod usage does not explain the load.
+- Use `oc debug node/<node>` to read `/host/proc/interrupts` twice over a known interval. Compare **deltas** for reserved-CPU columns and identify the IRQ/device; a lifetime total alone does not demonstrate high current activity.
 
-## Step 3: Check for high interrupt rates on reserved CPUs
+## 4. Report
 
-Use `oc debug` to get inside the cluster node, and check the interrupt rates on the reserved CPUs by reading `/proc/interrupts`. Identify any reserved CPU with a high interrupt usage.
-
-## Step 4: Final report
-
-Report status on each of the checks for the cluster nodes.
+For each node, give the reserved CPU source, per-CPU utilization, likely contributors and interrupt evidence, with measured values and intervals. Mark missing metrics, permissions, or reservation data **unable to verify** and suggest remediation only for supported deviations.

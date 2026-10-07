@@ -1,37 +1,30 @@
 ---
 name: check-low-latency-configuration
-description: Run a complete health check of an OpenShift cluster to verify that its configuration allows low latency workloads to run. Use when user wants to check if the cluster configuration complies with the requirements to run low latency workloads.
+description: Assess OpenShift PerformanceProfile nodes for low-latency readiness using per-node CPU, kernel and network evidence.
 ---
 
 # Check low latency configuration
 
-## When to use
+## Scope and rules
 
-- Use this skill when you want to check if the OpenShift cluster configuration complies with the requirements to run low latency workloads.
+Read-only assessment. List PerformanceProfiles and nodes once; match each profile's `spec.nodeSelector` to node labels, and assess **each matching node** against its profile. Report nodes with no matching profile separately rather than assigning them a profile. Mark each check **pass**, **deviation**, or **unable to verify**.
 
-## Rules
+## 1. Check the PerformanceProfile
 
-- NEVER try to do any change of the current configuration
+- Check reserved CPU usage by node and CPU using `references/cpu-per-core.md`.
+- Check the topology policy in the profile (`spec.numa.topologyPolicy`): expected values are `single-numa-node` or `restricted`. State the observed value if different or absent.
 
-## Prerequisite: find performance profile resources
+## 2. Collect node-level evidence
 
-The analysis will focus on the nodes matching a performance profile `nodeSelector`.
+On each matching node, gather the following in one node-scoped investigation; reuse the node identity and observation interval across checks:
 
-- Retrieve the PerformanceProfile resource(s) from the cluster.
-- For each performance profile, find which nodes it applies to by checking which cluster nodes match its `spec.nodeSelector` field.
+- Network kernel settings: `references/recommended-sriov-net-kernel-settings.md`.
+- Softnet drops and time_squeeze: `references/softnet.md`.
+- SMI activity (when MSR access is available): `references/smi.md`.
+- TCP/UDP error and drop counters: `references/tcp-udp-layers-information.md`.
 
-## Step 1: Check OpenShift performance profile configuration
+Counters are cumulative: check increases over a known interval, not merely nonzero totals. If a metric or privileged node read is unavailable, mark that check unable to verify rather than substituting data from a different node.
 
-1. For each cluster node matching a performance profile, check the CPU usage of its reserved cores. Refer to `references/cpu-per-core.md` for detailed instructions.
-2. Make sure the topology policy defined in the performance profile is either "single-numa-node" or "restricted".
+## 3. Report
 
-## Step 2: Check low-level OpenShift node configuration
-
-1. Check the kernel settings under /proc/sys/net are correct. Refer to `references/recommended-sriov-net-kernel-settings.md` for detailed information.
-2. Check for softnet packet-drop errors or high time_squeeze values, which can indicate network contention on the node running the pod. Refer to `references/softnet.md` for detailed instructions.
-3. Check for a high number of SMI received by the node's CPU. Refer to `references/smi.md` for detailed instructions.
-4. Check for any drops or errors at the TCP and UDP layers on the cluster nodes. Refer to `references/tcp-udp-layers-information.md` for detailed instructions.
-
-## Step 3: Final report
-
-Report findings for each cluster node, together with potential fixes.
+For each profile and node, summarize observed values, intervals, deviations, and evidence-based potential fixes. Identify checks that could not be verified; do not claim whole-cluster compliance from a subset of nodes.
