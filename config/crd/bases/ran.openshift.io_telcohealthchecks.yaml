@@ -160,6 +160,34 @@ spec:
                 description: PeriodicHealthChecks defines the schedule for periodic
                   agentic health checks.
                 properties:
+                  lowLatencyCheck:
+                    description: LowLatencyCheck configures the low-latency readiness
+                      check schedule and enablement.
+                    properties:
+                      enabled:
+                        description: Enabled activates low-latency checks when true.
+                        type: boolean
+                      maxJitter:
+                        description: MaxJitter overrides the global maximum per-cluster
+                          creation delay.
+                        type: string
+                        x-kubernetes-validations:
+                        - message: maxJitter must be non-negative
+                          rule: duration(self) >= duration('0s')
+                      minJitter:
+                        description: MinJitter overrides the global minimum per-cluster
+                          creation delay.
+                        type: string
+                        x-kubernetes-validations:
+                        - message: minJitter must be non-negative
+                          rule: duration(self) >= duration('0s')
+                      period:
+                        description: Period overrides the default check interval for
+                          low-latency checks.
+                        type: string
+                    required:
+                    - enabled
+                    type: object
                   maxJitter:
                     description: |-
                       MaxJitter is the upper bound of the independent per-cluster delay.
@@ -223,6 +251,13 @@ spec:
                     ? self.rdsCompliance.minJitter : (has(self.minJitter) ? self.minJitter
                     : ''30s'')) <= duration(has(self.rdsCompliance.maxJitter) ? self.rdsCompliance.maxJitter
                     : (has(self.maxJitter) ? self.maxJitter : ''5m''))'
+                - message: effective low-latency check minJitter must be less than
+                    or equal to maxJitter
+                  rule: '!has(self.lowLatencyCheck) || duration(has(self.lowLatencyCheck.minJitter)
+                    ? self.lowLatencyCheck.minJitter : (has(self.minJitter) ? self.minJitter
+                    : ''30s'')) <= duration(has(self.lowLatencyCheck.maxJitter) ?
+                    self.lowLatencyCheck.maxJitter : (has(self.maxJitter) ? self.maxJitter
+                    : ''5m''))'
               purgeInterval:
                 description: |-
                   PurgeInterval is the maximum age of hub-side run records. When omitted,
@@ -294,6 +329,11 @@ spec:
                   - type
                   type: object
                 type: array
+              lastLowLatencyCheckRunTime:
+                description: LastLowLatencyCheckRunTime records when the last low-latency
+                  check was triggered.
+                format: date-time
+                type: string
               lastPeriodicRunTime:
                 description: LastPeriodicRunTime records when the last periodic health
                   check was triggered.

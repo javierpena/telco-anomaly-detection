@@ -41,6 +41,11 @@ spec:
       enabled: false
       # period: 24h  # uncomment to override the default period for RDS checks
       # maxJitter: 10m  # override only the global maximum for this check
+    lowLatencyCheck:
+      enabled: false
+      # period: 12h  # optional low-latency-specific interval
+      # minJitter: 1m  # optional override of the global minimum
+      # maxJitter: 10m  # optional override of the global maximum
 
   # Keep hub-side run records for 7 days; omit to retain them indefinitely.
   # purgeInterval: 168h

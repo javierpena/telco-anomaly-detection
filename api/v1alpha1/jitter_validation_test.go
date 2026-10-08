@@ -41,6 +41,7 @@ func TestJitterAdmissionValidation(t *testing.T) {
 		name   string
 		global map[string]interface{}
 		rds    map[string]interface{}
+		low    map[string]interface{}
 		bad    bool
 	}{
 		{name: "defaults"},
@@ -53,6 +54,13 @@ func TestJitterAdmissionValidation(t *testing.T) {
 		{name: "check single bound invalid", rds: map[string]interface{}{"maxJitter": "0s"}, bad: true},
 		{name: "check negative", rds: map[string]interface{}{"minJitter": "-1s"}, bad: true},
 		{name: "check fixed positive", rds: map[string]interface{}{"minJitter": "10s", "maxJitter": "10s"}},
+		{name: "low-latency inherits global", global: map[string]interface{}{"maxJitter": "1m"},
+			low: map[string]interface{}{"minJitter": "45s"}},
+		{name: "low-latency single bound invalid", low: map[string]interface{}{"maxJitter": "0s"}, bad: true},
+		{name: "low-latency negative", low: map[string]interface{}{"minJitter": "-1s"}, bad: true},
+		{name: "low-latency fixed zero", low: map[string]interface{}{"minJitter": "0s", "maxJitter": "0s"}},
+		{name: "checks independent", rds: map[string]interface{}{"minJitter": "0s", "maxJitter": "0s"},
+			low: map[string]interface{}{"minJitter": "2m", "maxJitter": "3m"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			periodic := map[string]interface{}{"period": "1h"}
@@ -65,6 +73,13 @@ func TestJitterAdmissionValidation(t *testing.T) {
 					rds[k] = v
 				}
 				periodic["rdsCompliance"] = rds
+			}
+			if tc.low != nil {
+				low := map[string]interface{}{"enabled": true}
+				for k, v := range tc.low {
+					low[k] = v
+				}
+				periodic["lowLatencyCheck"] = low
 			}
 			obj := map[string]interface{}{"spec": map[string]interface{}{"periodicHealthChecks": periodic}}
 			errs, _ := validator.Validate(context.Background(), nil, structural, obj, nil, 1000000)

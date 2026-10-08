@@ -22,7 +22,8 @@ const (
 
 // checkTypeConfigMaps maps a periodic check type to the ConfigMap that holds its AgenticRun config.
 var checkTypeConfigMaps = map[string]string{
-	"rds-compliance": "telco-anomaly-rds-compliance-config",
+	"rds-compliance":    "telco-anomaly-rds-compliance-config",
+	"low-latency-check": "telco-anomaly-low-latency-check-config",
 }
 
 // createAgenticRunsForClusters creates an AgenticRun on each listed managed cluster.

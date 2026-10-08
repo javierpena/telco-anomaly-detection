@@ -65,6 +65,7 @@ Hub cluster
 │  │  telco-anomaly-host-network-config                   │  │
 │  │  telco-anomaly-pod-network-config                    │  │
 │  │  telco-anomaly-rds-compliance-config                 │  │
+│  │  telco-anomaly-low-latency-check-config              │  │
 │  └──────────────────────────────────────────────────────┘  │
 └────────────────────────────────────────────────────────────┘
 ```
@@ -169,6 +170,9 @@ The receiver validates `labels.alertname` against the Thanos rules it wrote itse
 | `periodicHealthChecks.rdsCompliance.enabled` | `bool` | Activate the RDS compliance periodic check. |
 | `periodicHealthChecks.rdsCompliance.period` | `duration` | Override interval for the RDS compliance check. |
 | `periodicHealthChecks.rdsCompliance.minJitter` / `.maxJitter` | `duration` (optional) | Override either global jitter bound independently for RDS compliance. |
+| `periodicHealthChecks.lowLatencyCheck.enabled` | `bool` | Activate low-latency readiness checks; disabled when omitted. |
+| `periodicHealthChecks.lowLatencyCheck.period` | `duration` (optional) | Override the default interval for low-latency checks. |
+| `periodicHealthChecks.lowLatencyCheck.minJitter` / `.maxJitter` | `duration` (optional) | Override either global jitter bound independently for low-latency checks. |
 | `logLevel` | `info\|debug` | Controls log verbosity in both pods. Changes take effect on next reconcile without restart. |
 | `purgeInterval` | `duration` (optional) | Maximum age of hub run records; when set, an hourly CronJob removes expired records. Must be a positive whole number of seconds. |
 
@@ -179,6 +183,7 @@ The receiver validates `labels.alertname` against the Thanos rules it wrote itse
 | `monitoredClusters` | Resolved list of cluster names currently being monitored. |
 | `lastPeriodicRunTime` | Timestamp of the last generic periodic check (reserved; not yet written). |
 | `lastRDSComplianceRunTime` | Timestamp of the last RDS compliance check. |
+| `lastLowLatencyCheckRunTime` | Timestamp of the last low-latency check schedule claim. |
 | `conditions` | Standard `metav1.Condition` array for reconciliation state. |
 
 ### Sample CR
@@ -202,6 +207,8 @@ spec:
   periodicHealthChecks:
     period: 6h
     rdsCompliance:
+      enabled: false
+    lowLatencyCheck:
       enabled: false
   logLevel: info
 ```
@@ -277,25 +284,26 @@ Triggered by changes to the singleton `TelcoHealthcheck` CR or `ManagedCluster` 
 4a. **Resolve monitored clusters and sync spoke watches** (`getMonitoredClusters`) — list `ManagedCluster` resources and apply include/exclude rules, then start/cancel AgenticRun and AnalysisResult list/watches (including credential changes).
 4b. **Recover pending records** — check stale pending hub records against their spoke runs. This and watch sync precede managed-resource reconciliation so unrelated resource errors cannot stop result tracking.
 5. **Reconcile system-alert ConfigMaps** (`reconcileSystemAlertConfigMaps`) — for each of the four system alerts (`hostNetwork`, `podNetwork`, `hostReservedCPU`, `ovsProcessCPU`), creates or updates the corresponding ConfigMap in the operator namespace from the embedded asset file when the spec boolean is `true`, and deletes it when `false`. Must run before the alert-rule listing step. Returns an error (requeueing) if any create/update/delete fails.
-5a. **Reconcile system-periodic ConfigMaps** (`reconcileSystemPeriodicConfigMaps`) — for each periodic check type (`rdsCompliance`), creates or updates the corresponding ConfigMap in the operator namespace from the embedded asset file when the spec boolean is `true`, and deletes it when `false`. Mirrors the behaviour of step 5 for system-alert ConfigMaps. Returns an error (requeueing) if any create/update/delete fails.
+5a. **Reconcile system-periodic ConfigMaps** (`reconcileSystemPeriodicConfigMaps`) — for each periodic check type (`rdsCompliance`, `lowLatencyCheck`), creates or updates the corresponding ConfigMap in the operator namespace from the embedded asset file when the spec boolean is `true`, and deletes it when `false`. Mirrors the behaviour of step 5 for system-alert ConfigMaps. Returns an error (requeueing) if any create/update/delete fails.
 5b. **Reconcile kube-compare-mcp** (`reconcileKubeCompareMCP`) — when `rdsCompliance.enabled` is true, creates the registry credentials secret and applies the kube-compare-mcp ServiceAccount, ClusterRole, ClusterRoleBinding, Deployment, Service, and Route via server-side apply. When false, removes all of those resources. Returns an error that stops the reconcile if any step fails.
 5c. **Reconcile purge CronJob** — create/update `telco-healthcheck-purge` when `spec.purgeInterval` is set; remove it otherwise.
 7. **Reconcile Thanos alert rules** (`reconcileAlertRules`) — lists system-alert ConfigMaps (always) and user-alert ConfigMaps (when `userAlerts` is true) in the operator namespace, builds a unified Prometheus YAML from their `alertRule` fields, and creates or updates `thanos-ruler-custom-rules` in `open-cluster-management-observability`. Group names come from `alertGroupName` (system alerts) or default to `telco-user-<alertname-lowercased>` (user alerts). Non-fatal if this fails.
 8. **Reconcile AlertManager receiver** (`reconcileAlertManagerReceiver`) — read the `alertmanager-config` Secret in `open-cluster-management-observability`, upsert a webhook receiver entry pointing to the alert receiver service URL. Non-fatal if this fails.
 8a. **Reconcile MCO custom metrics allowlist** (`reconcileObservabilityMetrics`) — same listing pattern as step 7; deduplicates and writes all metric names from `alertMetrics` fields to `observability-metrics-custom-allowlist` in `open-cluster-management-observability`. Non-fatal if this fails.
-9. **Periodic checks** (`runPeriodicChecks`) — for each enabled sub-check, if its period has elapsed, validate its AgenticRun config and jitter window, then persist the due-time claim in status before scheduling AgenticRuns on monitored spokes. The status update uses the API resource version as an optimistic lock: a queued reconcile holding stale status stops before scheduling another run. Currently only RDS compliance is implemented; remaining status is persisted at the end of reconciliation. Each spoke receives an independently sampled, inclusive delay within its effective jitter window. Delayed tasks use the manager shutdown context so they stop on pod shutdown; `0s`/`0s` retains synchronous creation. A fixed positive window delays every cluster by that amount. The status timestamp records the scheduling decision, not the completion time. Delayed tasks exist only in memory: a shutdown before creation can skip that cluster for this interval, and a jitter window longer than the period can leave intervals overlapping.
+9. **Periodic checks** (`runPeriodicChecks`) — `configuredPeriodicChecks` binds each check's name, enablement, period/jitter overrides, and own status timestamp into a descriptor. One loop handles all enabled checks in registration order: when due, validate its AgenticRun config and jitter window, then persist the due-time claim before scheduling AgenticRuns on monitored spokes. Add future checks to the descriptor list instead of duplicating the scheduling block. The status update uses the API resource version as an optimistic lock: a queued reconcile holding stale status stops before scheduling another run. The earliest due check determines the next requeue; remaining status is persisted at the end of reconciliation. Each spoke receives an independently sampled, inclusive delay within its effective jitter window. Delayed tasks use the manager shutdown context so they stop on pod shutdown; `0s`/`0s` retains synchronous creation. A fixed positive window delays every cluster by that amount. The status timestamp records the scheduling decision, not the completion time. Delayed tasks exist only in memory: a shutdown before creation can skip that cluster for this interval, and a jitter window longer than the period can leave intervals overlapping.
 10. **Persist status** — write status changes not already included in the periodic schedule claim back to the API server.
 11. **Requeue** — return `ctrl.Result{RequeueAfter: <time-until-next-check>}`.
 
 ### Cleanup (on deletion)
 
-`cleanupResources` runs five steps (all attempted even if earlier ones fail):
+`cleanupResources` attempts each cleanup step even if an earlier one fails:
 1. Remove the AlertManager webhook receiver entry from `alertmanager-config`.
 2. Delete the `thanos-ruler-custom-rules` ConfigMap.
 3. Remove all kube-compare-mcp resources (`cleanupKubeCompareMCP`) — idempotent, ignores not-found.
 4. Delete the `observability-metrics-custom-allowlist` ConfigMap (`cleanupObservabilityMetrics`) — idempotent, ignores not-found.
 5. Delete all four system-alert ConfigMaps (`cleanupSystemAlertConfigMaps`) — idempotent, ignores not-found.
-6. Stop spoke watches and remove the purge CronJob. Hub run records carry an owner reference to the cluster-scoped singleton and are garbage-collected when it is deleted.
+6. Delete all system-periodic ConfigMaps (`cleanupSystemPeriodicConfigMaps`) — idempotent, ignores not-found.
+7. Remove the purge CronJob. Spoke watches are stopped during deletion; hub run records carry an owner reference to the cluster-scoped singleton and are garbage-collected when it is deleted.
 
 ---
 
@@ -516,10 +524,13 @@ Each trigger type reads its AgenticRun parameters from a dedicated ConfigMap in 
 | `TelcoHealthCheckHostReservedCPU` alert | `telco-anomaly-host-reserved-cpu-config` | Managed by `reconcileSystemAlertConfigMaps` from embedded asset |
 | `TelcoHealthCheckOVSProcessCPU` alert | `telco-anomaly-ovs-process-cpu-config` | Managed by `reconcileSystemAlertConfigMaps` from embedded asset |
 | `rds-compliance` periodic check | `telco-anomaly-rds-compliance-config` | Managed by `reconcileSystemPeriodicConfigMaps` from embedded asset |
+| `low-latency-check` periodic check | `telco-anomaly-low-latency-check-config` | Managed by `reconcileSystemPeriodicConfigMaps` from embedded asset |
 
 The four alert-type ConfigMaps carry label `ran.openshift.io/system-managed-alert: "true"`. The controller creates or updates them from the embedded asset YAML on every reconcile (when the corresponding spec boolean is true) and deletes them when disabled.
 
-The periodic-check ConfigMap (`telco-anomaly-rds-compliance-config`) carries label `ran.openshift.io/system-managed-periodic: "true"` and follows the same create-or-update lifecycle, controlled by `spec.periodicHealthChecks.rdsCompliance.enabled`.
+The periodic-check ConfigMaps (`telco-anomaly-rds-compliance-config` and `telco-anomaly-low-latency-check-config`) carry label `ran.openshift.io/system-managed-periodic: "true"` and follow the same create-or-update lifecycle, controlled by `spec.periodicHealthChecks.rdsCompliance.enabled` and `spec.periodicHealthChecks.lowLatencyCheck.enabled` respectively.
+
+The `low-latency-check` ConfigMap configures the skill path `/skills/check-low-latency-configuration` from `quay.io/javierpena/telco-anomaly-skills:latest` and `mcpServers: []`.
 
 **ConfigMap data keys (all ConfigMaps):**
 
@@ -738,7 +749,7 @@ ClusterIP Service `telco-anomaly-controller-metrics` in
 - Liveness/readiness: `GET /healthz`
 - Resources: limits 200m CPU / 128Mi RAM; requests 50m CPU / 32Mi RAM
 
-All AgenticRun config ConfigMaps (`telco-anomaly-host-network-config`, `telco-anomaly-pod-network-config`, `telco-anomaly-host-reserved-cpu-config`, `telco-anomaly-ovs-process-cpu-config`, `telco-anomaly-rds-compliance-config`) are managed at runtime from embedded asset files in `internal/controller/assets/`. There is no separate deploy-time YAML for these ConfigMaps. The controller creates or updates each one on every reconcile based on the corresponding spec boolean; content comes from the embedded asset and is always kept in sync with the binary.
+All AgenticRun config ConfigMaps (`telco-anomaly-host-network-config`, `telco-anomaly-pod-network-config`, `telco-anomaly-host-reserved-cpu-config`, `telco-anomaly-ovs-process-cpu-config`, `telco-anomaly-rds-compliance-config`, `telco-anomaly-low-latency-check-config`) are managed at runtime from embedded asset files in `internal/controller/assets/`. There is no separate deploy-time YAML for these ConfigMaps. The controller creates or updates each one on every reconcile based on the corresponding spec boolean; content comes from the embedded asset and is always kept in sync with the binary.
 
 ### `config/crd/bases/ran.openshift.io_telcohealthchecks.yaml`
 

@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
@@ -140,4 +141,56 @@ func TestCleanupSystemPeriodicConfigMaps_NoneExist(t *testing.T) {
 	if err := cleanupSystemPeriodicConfigMaps(context.Background(), c, "test-ns"); err != nil {
 		t.Errorf("expected no error when CMs don't exist, got: %v", err)
 	}
+}
+
+func TestLowLatencyPeriodicConfigMapLifecycle(t *testing.T) {
+	ctx := context.Background()
+	c := fake.NewClientBuilder().WithScheme(newTestScheme(t)).Build()
+	key := types.NamespacedName{Name: "telco-anomaly-low-latency-check-config", Namespace: "test-ns"}
+	periodic := ranv1alpha1.PeriodicHealthChecksSpec{}
+	checkAbsent := func() {
+		t.Helper()
+		if err := c.Get(ctx, key, &corev1.ConfigMap{}); !apierrors.IsNotFound(err) {
+			t.Fatalf("expected low-latency ConfigMap to be absent, got %v", err)
+		}
+	}
+	if err := reconcileSystemPeriodicConfigMaps(ctx, c, key.Namespace, periodic); err != nil {
+		t.Fatal(err)
+	}
+	checkAbsent()
+
+	periodic.LowLatencyCheck.Enabled = true
+	if err := reconcileSystemPeriodicConfigMaps(ctx, c, key.Namespace, periodic); err != nil {
+		t.Fatal(err)
+	}
+	cm := &corev1.ConfigMap{}
+	if err := c.Get(ctx, key, cm); err != nil {
+		t.Fatal(err)
+	}
+	if cm.Labels[systemPeriodicLabel] != systemPeriodicLabelValue || cm.Data["checkName"] != "low-latency-check" ||
+		cm.Data["mcpServers"] != "[]" {
+		t.Fatalf("unexpected low-latency ConfigMap: %+v", cm)
+	}
+	cm.Data["request"] = "stale"
+	if err := c.Update(ctx, cm); err != nil {
+		t.Fatal(err)
+	}
+	if err := reconcileSystemPeriodicConfigMaps(ctx, c, key.Namespace, periodic); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Get(ctx, key, cm); err != nil || cm.Data["request"] == "stale" {
+		t.Fatalf("expected request to be restored, got %q: %v", cm.Data["request"], err)
+	}
+	if err := cleanupSystemPeriodicConfigMaps(ctx, c, key.Namespace); err != nil {
+		t.Fatal(err)
+	}
+	checkAbsent()
+	if err := reconcileSystemPeriodicConfigMaps(ctx, c, key.Namespace, periodic); err != nil {
+		t.Fatal(err)
+	}
+	periodic.LowLatencyCheck.Enabled = false
+	if err := reconcileSystemPeriodicConfigMaps(ctx, c, key.Namespace, periodic); err != nil {
+		t.Fatal(err)
+	}
+	checkAbsent()
 }

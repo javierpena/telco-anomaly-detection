@@ -262,6 +262,31 @@ func (r *TelcoHealthcheckReconciler) cleanupResources(
 	return firstErr
 }
 
+// periodicCheck binds a check's schedule overrides to its status timestamp.
+// Add new periodic checks to configuredPeriodicChecks; scheduling is shared.
+type periodicCheck struct {
+	name                         string
+	enabled                      bool
+	period, minJitter, maxJitter *metav1.Duration
+	lastRun                      **metav1.Time
+}
+
+func configuredPeriodicChecks(thc *ranv1alpha1.TelcoHealthcheck) []periodicCheck {
+	p := &thc.Spec.PeriodicHealthChecks
+	return []periodicCheck{
+		{
+			name: "rds-compliance", enabled: p.RDSCompliance.Enabled,
+			period: p.RDSCompliance.Period, minJitter: p.RDSCompliance.MinJitter, maxJitter: p.RDSCompliance.MaxJitter,
+			lastRun: &thc.Status.LastRDSComplianceRunTime,
+		},
+		{
+			name: "low-latency-check", enabled: p.LowLatencyCheck.Enabled,
+			period: p.LowLatencyCheck.Period, minJitter: p.LowLatencyCheck.MinJitter, maxJitter: p.LowLatencyCheck.MaxJitter,
+			lastRun: &thc.Status.LastLowLatencyCheckRunTime,
+		},
+	}
+}
+
 // runPeriodicChecks runs each enabled periodic sub-check whose period has elapsed
 // and returns the duration until the next required reconcile.
 // AgenticRuns are only created for sub-checks that are explicitly enabled; if all
@@ -284,47 +309,50 @@ func (r *TelcoHealthcheckReconciler) runPeriodicChecks(
 
 	requeueAfter := period
 	statusPersisted := false
-
-	// RDS compliance check.
-	rds := thc.Spec.PeriodicHealthChecks.RDSCompliance
-	if rds.Enabled {
+	delayCtx := r.ShutdownContext
+	if delayCtx == nil {
+		delayCtx = ctx
+	}
+	for _, check := range configuredPeriodicChecks(thc) {
+		if !check.enabled {
+			continue
+		}
 		minJitter, maxJitter, err := resolvePeriodicJitter(thc.Spec.PeriodicHealthChecks,
-			"rds-compliance", rds.MinJitter, rds.MaxJitter)
+			check.name, check.minJitter, check.maxJitter)
 		if err != nil {
-			return requeueAfter, false, err
+			return requeueAfter, statusPersisted, err
 		}
-		rdsPeriod := period
-		if rds.Period != nil {
-			rdsPeriod = rds.Period.Duration
+		checkPeriod := period
+		if check.period != nil {
+			checkPeriod = check.period.Duration
+		}
+		if checkPeriod > 0 && checkPeriod < requeueAfter {
+			requeueAfter = checkPeriod
 		}
 
-		if shouldRunCheck(thc.Status.LastRDSComplianceRunTime, rdsPeriod) {
-			logger.Info("running RDS compliance health checks")
-			cfg, err := loadRunConfigForCheck(ctx, r.Client, "rds-compliance")
+		if shouldRunCheck(*check.lastRun, checkPeriod) {
+			logger.Info("running periodic health checks", "checkType", check.name)
+			cfg, err := loadRunConfigForCheck(ctx, r.Client, check.name)
 			if err != nil {
-				return requeueAfter, false, err
+				return requeueAfter, statusPersisted, err
 			}
 
 			// Persist the schedule claim before making the non-transactional spoke
 			// create. A queued reconcile can have a stale cache entry; the status
 			// update's resourceVersion check makes it stop before creating a second
 			// AgenticRun if another reconcile already claimed this interval.
-			thc.Status.LastRDSComplianceRunTime = &now
+			*check.lastRun = &now
 			if err := r.Status().Update(ctx, thc); err != nil {
-				return requeueAfter, false, fmt.Errorf("persisting RDS compliance schedule claim: %w", err)
+				return requeueAfter, statusPersisted, fmt.Errorf("persisting %s schedule claim: %w", check.name, err)
 			}
 			statusPersisted = true
 
-			delayCtx := r.ShutdownContext
-			if delayCtx == nil {
-				delayCtx = ctx
-			}
 			if err := createAgenticRunsForClustersWithConfig(ctx, r.Client, thc.DeepCopy(), monitoredClusters,
-				"rds-compliance", cfg, minJitter, maxJitter, delayCtx); err != nil {
-				return requeueAfter, statusPersisted, fmt.Errorf("creating RDS compliance AgenticRuns: %w", err)
+				check.name, cfg, minJitter, maxJitter, delayCtx); err != nil {
+				return requeueAfter, statusPersisted, fmt.Errorf("creating %s AgenticRuns: %w", check.name, err)
 			}
-		} else if thc.Status.LastRDSComplianceRunTime != nil {
-			untilNext := rdsPeriod - time.Since(thc.Status.LastRDSComplianceRunTime.Time)
+		} else if *check.lastRun != nil {
+			untilNext := checkPeriod - time.Since((*check.lastRun).Time)
 			if untilNext > 0 && untilNext < requeueAfter {
 				requeueAfter = untilNext
 			}

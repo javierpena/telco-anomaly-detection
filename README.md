@@ -11,7 +11,7 @@ Spoke metrics → observability-addon → Hub Thanos Ruler → AlertManager
                                                    │ POST /webhook
                                                    ▼
                                             Hub Alert Receiver ──┐
-                                            Hub Controller (RDS) ─┴─► Spoke AgenticRun
+                                       Hub Controller (periodic) ─┴─► Spoke AgenticRun
                                                                      │
                                                                      ▼
                                                                OpenShift Lightspeed
@@ -31,7 +31,7 @@ Spoke AgenticRun + AnalysisResult → Hub Controller watch → Hub TelcoHealthCh
 
 | Component | Description |
 |---|---|
-| **Controller** | Reconciles the singleton `TelcoHealthcheck`; manages Thanos rules, AlertManager, the MCO metrics allowlist, periodic RDS checks, spoke status watches, and run-record cleanup |
+| **Controller** | Reconciles the singleton `TelcoHealthcheck`; manages Thanos rules, AlertManager, the MCO metrics allowlist, periodic checks, spoke status watches, and run-record cleanup |
 | **Alert Receiver** | HTTP webhook server (`POST /webhook`) that receives AlertManager payloads and creates AgenticRuns on the affected spoke cluster |
 | **Skills OCI image** | OCI image containing Lightspeed skills referenced by the `skills` configuration of individual AgenticRuns |
 
@@ -76,24 +76,34 @@ spec:
     # minJitter: 30s      # default minimum per-cluster creation delay
     # maxJitter: 5m       # default maximum; set both bounds to 0s to disable jitter
     rdsCompliance:
-      enabled: false       # enable the currently implemented periodic check
+      enabled: false       # opt in to RDS compliance checks
       # period: 24h        # optional RDS-specific override
       # maxJitter: 10m     # optional override of just the upper bound
+    lowLatencyCheck:
+      enabled: false       # opt in to low-latency readiness checks
+      # period: 12h        # optional low-latency-specific override
+      # minJitter: 1m      # optional override of the lower bound
+      # maxJitter: 10m     # optional override of the upper bound
 
   logLevel: info           # info or debug; changes on next reconcile
   # purgeInterval: 168h   # optional retention for hub run records
 ```
 
-Only RDS compliance currently uses the periodic schedule. Enabling it deploys
-`kube-compare-mcp` in the operator namespace; with a nonzero default period, it
-also creates a run on each monitored spoke when due. The RDS check can override
-the default interval with `rdsCompliance.period`. Periodic AgenticRun creation
-is spread across an independent 30s–5m window per cluster by default. Either
-RDS jitter bound can override its global bound independently; bounds must be
-non-negative and the effective minimum must not exceed the maximum. To create
-runs synchronously, set both global bounds to `0s` (unless overridden for RDS).
-The status timestamp marks when the interval was claimed, so a controller
-restart during a delay may skip that interval's run on some spokes.
+All periodic checks are opt-in. With a nonzero global period, each enabled check
+creates an `AgenticRun` on every monitored spoke when due. `rdsCompliance.period`
+and `lowLatencyCheck.period` independently override the default interval. Enabling
+RDS compliance also deploys `kube-compare-mcp` in the operator namespace.
+
+The `low-latency-check` uses `/skills/check-low-latency-configuration` from the
+skills image and requires no MCP servers.
+
+`${CLUSTER_NAME}` is expanded for each spoke. Periodic AgenticRun creation is
+spread across an independent 30s–5m window per cluster by default. Each check
+can override each global jitter bound independently; bounds must be non-negative
+and the effective minimum must not exceed the maximum. To create runs
+synchronously, set both global bounds to `0s` (unless overridden per check).
+The per-check status timestamp marks when the interval was claimed, so a
+controller restart during a delay may skip that interval's run on some spokes.
 
 ### Alert types
 
@@ -165,7 +175,7 @@ This applies the CRDs, RBAC, validating webhook, Services, and Deployments. The 
 kubectl apply -f config/samples/ran_v1alpha1_telcohealthcheck.yaml
 ```
 
-The sample enables host and pod network alerts and host-reserved-CPU alerts; RDS compliance and user-defined alerts are disabled. Adjust the sample for your monitored clusters before applying it.
+The sample enables host and pod network alerts and host-reserved-CPU alerts; RDS compliance, low-latency checks, and user-defined alerts are disabled. Adjust the sample for your monitored clusters before applying it.
 
 ### 6. Configure AgenticRun investigations (optional)
 
@@ -178,6 +188,7 @@ Each enabled built-in alert and periodic check gets a controller-managed ConfigM
 | `telco-anomaly-host-reserved-cpu-config` | `TelcoHealthCheckHostReservedCPU` |
 | `telco-anomaly-ovs-process-cpu-config` | `TelcoHealthCheckOVSProcessCPU` |
 | `telco-anomaly-rds-compliance-config` | RDS compliance periodic check |
+| `telco-anomaly-low-latency-check-config` | Low-latency readiness periodic check |
 
 The pod-network built-in currently uses a placeholder `request: "test"`. User-defined alerts can supply their own prompt and tools in their labeled ConfigMap without rebuilding the operator; see [Adding a new alert](docs/adding-a-new-alert.md).
 

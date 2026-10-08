@@ -184,6 +184,156 @@ func TestRunPeriodicChecks_ClaimsBeforeDelayedCreation(t *testing.T) {
 	}
 }
 
+func TestRunPeriodicChecks_LowLatencyConfigAndSchedule(t *testing.T) {
+	ctx := context.Background()
+	thc := makeTelcoHealthcheck()
+	thc.UID = "test-owner-uid"
+	thc.Spec.PeriodicHealthChecks.LowLatencyCheck.Enabled = true
+	thc.Spec.PeriodicHealthChecks.LowLatencyCheck.Period = &metav1.Duration{Duration: 10 * time.Minute}
+	zero := &metav1.Duration{}
+	thc.Spec.PeriodicHealthChecks.LowLatencyCheck.MinJitter = zero
+	thc.Spec.PeriodicHealthChecks.LowLatencyCheck.MaxJitter = zero
+	spoke := fake.NewClientBuilder().WithScheme(runtime.NewScheme()).Build()
+	original := buildSpokeClient
+	defer func() { buildSpokeClient = original }()
+	buildSpokeClient = func([]byte) (client.Client, error) { return spoke, nil }
+	hub := fake.NewClientBuilder().WithScheme(newTestScheme(t)).
+		WithStatusSubresource(&ranv1alpha1.TelcoHealthcheck{}, &ranv1alpha1.TelcoHealthCheckRun{}).
+		WithObjects(thc, makeKubeconfigSecret("cluster-a")).Build()
+	if err := reconcileSystemPeriodicConfigMaps(ctx, hub, operatorNamespace, thc.Spec.PeriodicHealthChecks); err != nil {
+		t.Fatal(err)
+	}
+	key := types.NamespacedName{Name: thc.Name}
+	first := &ranv1alpha1.TelcoHealthcheck{}
+	stale := &ranv1alpha1.TelcoHealthcheck{}
+	for _, snapshot := range []*ranv1alpha1.TelcoHealthcheck{first, stale} {
+		if err := hub.Get(ctx, key, snapshot); err != nil {
+			t.Fatal(err)
+		}
+	}
+	r := &TelcoHealthcheckReconciler{Client: hub}
+	requeue, persisted, err := r.runPeriodicChecks(ctx, first, []string{"cluster-a"})
+	if err != nil || !persisted || requeue != 10*time.Minute {
+		t.Fatalf("expected low-latency claim and 10m requeue, got %s, %t, %v", requeue, persisted, err)
+	}
+	if _, _, err := r.runPeriodicChecks(ctx, stale, []string{"cluster-a"}); err == nil {
+		t.Fatal("expected stale low-latency schedule claim to fail")
+	}
+	stored := &ranv1alpha1.TelcoHealthcheck{}
+	if err := hub.Get(ctx, key, stored); err != nil {
+		t.Fatal(err)
+	}
+	if stored.Status.LastLowLatencyCheckRunTime == nil || stored.Status.LastRDSComplianceRunTime != nil {
+		t.Fatalf("unexpected check timestamps: %+v", stored.Status)
+	}
+	if next, claimed, err := r.runPeriodicChecks(ctx, stored, []string{"cluster-a"}); err != nil || claimed || next <= 0 || next > 10*time.Minute {
+		t.Fatalf("expected next low-latency check within 10m, got %s, %t, %v", next, claimed, err)
+	}
+	runs := &unstructured.UnstructuredList{}
+	runs.SetGroupVersionKind(schema.GroupVersionKind{Group: agenticrun.Group, Version: agenticrun.Version, Kind: agenticrun.Kind + "List"})
+	if err := spoke.List(ctx, runs); err != nil || len(runs.Items) != 1 {
+		t.Fatalf("expected one low-latency AgenticRun, got %d: %v", len(runs.Items), err)
+	}
+	run := runs.Items[0].Object
+	request, _, _ := unstructured.NestedString(run, "spec", "request")
+	wantRequest := "You are an experienced OpenShift administrator. With the available tools at your disposal, assess OpenShift nodes in cluster cluster-a for low-latency readiness"
+	if request != wantRequest {
+		t.Fatalf("unexpected low-latency request: %q", request)
+	}
+	skills, found, err := unstructured.NestedSlice(run, "spec", "tools", "skills")
+	if err != nil || !found || len(skills) != 1 {
+		t.Fatalf("expected one low-latency skill, got %v: %v", skills, err)
+	}
+	skill := skills[0].(map[string]interface{})
+	paths := skill["paths"].([]interface{})
+	if skill["image"] != "quay.io/javierpena/telco-anomaly-skills:latest" || len(paths) != 1 || paths[0] != "/skills/check-low-latency-configuration" {
+		t.Fatalf("unexpected low-latency skill: %v", skill)
+	}
+	if _, found, _ := unstructured.NestedSlice(run, "spec", "tools", "mcpServers"); found {
+		t.Fatal("low-latency AgenticRun must not include MCP servers")
+	}
+	stored.Spec.PeriodicHealthChecks.Period = metav1.Duration{}
+	if disabled, claimed, err := r.runPeriodicChecks(ctx, stored, []string{"cluster-a"}); err != nil || claimed || disabled != 0 {
+		t.Fatalf("expected global zero period to disable low-latency checks, got %s, %t, %v", disabled, claimed, err)
+	}
+}
+
+func TestRunPeriodicChecks_BothChecksClaimIndependently(t *testing.T) {
+	ctx := context.Background()
+	thc := makeTelcoHealthcheck()
+	thc.UID = "test-owner-uid"
+	thc.Spec.PeriodicHealthChecks.RDSCompliance.Enabled = true
+	thc.Spec.PeriodicHealthChecks.LowLatencyCheck.Enabled = true
+	zero := &metav1.Duration{}
+	thc.Spec.PeriodicHealthChecks.MinJitter = zero
+	thc.Spec.PeriodicHealthChecks.MaxJitter = zero
+	spoke := fake.NewClientBuilder().WithScheme(runtime.NewScheme()).Build()
+	original := buildSpokeClient
+	defer func() { buildSpokeClient = original }()
+	buildSpokeClient = func([]byte) (client.Client, error) { return spoke, nil }
+	hub := fake.NewClientBuilder().WithScheme(newTestScheme(t)).
+		WithStatusSubresource(&ranv1alpha1.TelcoHealthcheck{}, &ranv1alpha1.TelcoHealthCheckRun{}).
+		WithObjects(thc, makeKubeconfigSecret("cluster-a"),
+			makeAgenticRunConfigMap("telco-anomaly-rds-compliance-config", operatorNamespace)).Build()
+	if err := reconcileSystemPeriodicConfigMaps(ctx, hub, operatorNamespace, thc.Spec.PeriodicHealthChecks); err != nil {
+		t.Fatal(err)
+	}
+	if _, persisted, err := (&TelcoHealthcheckReconciler{Client: hub}).runPeriodicChecks(ctx, thc, []string{"cluster-a"}); err != nil || !persisted {
+		t.Fatalf("expected both schedule claims to persist, got %t: %v", persisted, err)
+	}
+	stored := &ranv1alpha1.TelcoHealthcheck{}
+	if err := hub.Get(ctx, types.NamespacedName{Name: thc.Name}, stored); err != nil {
+		t.Fatal(err)
+	}
+	if stored.Status.LastLowLatencyCheckRunTime == nil || stored.Status.LastRDSComplianceRunTime == nil {
+		t.Fatalf("expected independent status claims, got %+v", stored.Status)
+	}
+	runs := &unstructured.UnstructuredList{}
+	runs.SetGroupVersionKind(schema.GroupVersionKind{Group: agenticrun.Group, Version: agenticrun.Version, Kind: agenticrun.Kind + "List"})
+	if err := spoke.List(ctx, runs); err != nil || len(runs.Items) != 2 {
+		t.Fatalf("expected two AgenticRuns, got %d: %v", len(runs.Items), err)
+	}
+}
+
+func TestRunPeriodicChecks_EarliestCheckRequeue(t *testing.T) {
+	thc := makeTelcoHealthcheck()
+	thc.Spec.PeriodicHealthChecks.RDSCompliance.Enabled = true
+	thc.Spec.PeriodicHealthChecks.RDSCompliance.Period = &metav1.Duration{Duration: 45 * time.Minute}
+	thc.Spec.PeriodicHealthChecks.LowLatencyCheck.Enabled = true
+	thc.Spec.PeriodicHealthChecks.LowLatencyCheck.Period = &metav1.Duration{Duration: 10 * time.Minute}
+	rdsLast := metav1.Now()
+	lowLast := metav1.NewTime(time.Now().Add(-2 * time.Minute))
+	thc.Status.LastRDSComplianceRunTime = &rdsLast
+	thc.Status.LastLowLatencyCheckRunTime = &lowLast
+
+	requeue, persisted, err := (&TelcoHealthcheckReconciler{}).runPeriodicChecks(context.Background(), thc, nil)
+	if err != nil || persisted || requeue < 7*time.Minute || requeue > 8*time.Minute {
+		t.Fatalf("expected next low-latency check in about 8m, got %s, %t, %v", requeue, persisted, err)
+	}
+}
+
+func TestRunPeriodicChecks_LaterCheckErrorPreservesPriorClaim(t *testing.T) {
+	ctx := context.Background()
+	thc := makeTelcoHealthcheck()
+	thc.Spec.PeriodicHealthChecks.RDSCompliance.Enabled = true
+	thc.Spec.PeriodicHealthChecks.LowLatencyCheck.Enabled = true
+	hub := fake.NewClientBuilder().WithScheme(newTestScheme(t)).
+		WithStatusSubresource(&ranv1alpha1.TelcoHealthcheck{}).
+		WithObjects(thc, makeAgenticRunConfigMap("telco-anomaly-rds-compliance-config", operatorNamespace)).Build()
+
+	_, persisted, err := (&TelcoHealthcheckReconciler{Client: hub}).runPeriodicChecks(ctx, thc, nil)
+	if err == nil || !persisted || !strings.Contains(err.Error(), "low-latency-check") {
+		t.Fatalf("expected missing second config to preserve the first claim, got persisted=%t err=%v", persisted, err)
+	}
+	stored := &ranv1alpha1.TelcoHealthcheck{}
+	if err := hub.Get(ctx, types.NamespacedName{Name: thc.Name}, stored); err != nil {
+		t.Fatal(err)
+	}
+	if stored.Status.LastRDSComplianceRunTime == nil || stored.Status.LastLowLatencyCheckRunTime != nil {
+		t.Fatalf("unexpected status after second check failed: %+v", stored.Status)
+	}
+}
+
 func TestAlertReceiverURL_Default(t *testing.T) {
 	r := &TelcoHealthcheckReconciler{
 		OperatorNamespace: "telco-healthcheck-system",

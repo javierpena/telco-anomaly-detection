@@ -146,50 +146,26 @@ The key must match the `checkName` value in the asset YAML (step 1). The value m
 
 ---
 
-## Step 5 — Add the check to `runPeriodicChecks`
+## Step 5 — Register the check for scheduling
 
-In `internal/controller/telcohealthcheck_controller.go`, inside `runPeriodicChecks`, add a block modelled after the existing RDS compliance block. Use the shared helper to resolve and validate the effective jitter window before making a status claim:
+In `internal/controller/telcohealthcheck_controller.go`, add an entry to
+`configuredPeriodicChecks`. The shared loop in `runPeriodicChecks` resolves the
+effective period and jitter, checks the timestamp, loads the ConfigMap, claims
+the schedule interval in status, and creates AgenticRuns:
 
 ```go
-check := thc.Spec.PeriodicHealthChecks.<Name>
-if check.Enabled {
-    checkMinJitter, checkMaxJitter, err := resolvePeriodicJitter(
-        thc.Spec.PeriodicHealthChecks, "<name>", check.MinJitter, check.MaxJitter)
-    if err != nil { return requeueAfter, statusPersisted, err }
-    checkPeriod := period
-    if check.Period != nil {
-        checkPeriod = check.Period.Duration
-    }
-
-    if shouldRunCheck(thc.Status.Last<Name>RunTime, checkPeriod) {
-        logger.Info("running <name> health checks")
-        cfg, err := loadRunConfigForCheck(ctx, r.Client, "<name>")
-        if err != nil {
-            return requeueAfter, statusPersisted, err
-        }
-        thc.Status.Last<Name>RunTime = &now
-        if err := r.Status().Update(ctx, thc); err != nil {
-            return requeueAfter, statusPersisted, err
-        }
-        statusPersisted = true
-        delayCtx := r.ShutdownContext
-        if delayCtx == nil { delayCtx = ctx }
-        if err := createAgenticRunsForClustersWithConfig(ctx, r.Client, thc.DeepCopy(), monitoredClusters,
-            "<name>", cfg, checkMinJitter, checkMaxJitter, delayCtx); err != nil {
-            return requeueAfter, statusPersisted, err
-        }
-    } else if thc.Status.Last<Name>RunTime != nil {
-        untilNext := checkPeriod - time.Since(thc.Status.Last<Name>RunTime.Time)
-        if untilNext > 0 && untilNext < requeueAfter {
-            requeueAfter = untilNext
-        }
-    }
-}
+{
+    name: "<name>", enabled: p.<Name>.Enabled,
+    period: p.<Name>.Period, minJitter: p.<Name>.MinJitter, maxJitter: p.<Name>.MaxJitter,
+    lastRun: &thc.Status.Last<Name>RunTime,
+},
 ```
 
-As with RDS, this preserves optimistic locking: a stale reconcile must fail its
-status update before launching any cluster tasks. A status claim records the
-scheduling decision, even if the process stops before all delayed runs start.
+The entry's name must match `checkName` in the asset and the key in
+`checkTypeConfigMaps`. The shared loop preserves optimistic locking: a stale
+reconcile must fail its status update before launching any cluster tasks. A
+status claim records the scheduling decision, even if the process stops before
+all delayed runs start.
 
 ---
 
@@ -225,7 +201,7 @@ scheduling decision, even if the process stops before all delayed runs start.
 | 3 | `api/v1alpha1/telcohealthcheck_types.go` | Add spec struct, `PeriodicHealthChecksSpec` field, status field |
 | 3 | Run `make generate && make manifests` | Regenerate DeepCopy and CRD |
 | 4 | `internal/controller/agenticrun.go` | Add entry to `checkTypeConfigMaps` |
-| 5 | `internal/controller/telcohealthcheck_controller.go` | Add check block in `runPeriodicChecks` |
+| 5 | `internal/controller/telcohealthcheck_controller.go` | Add a descriptor in `configuredPeriodicChecks` |
 | 6 | `config/samples/ran_v1alpha1_telcohealthcheck.yaml` | Add field to sample CR |
 | 6 | `docs/architecture.md` | Update AgenticRun config table |
 

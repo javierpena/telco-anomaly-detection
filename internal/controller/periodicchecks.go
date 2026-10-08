@@ -23,6 +23,9 @@ const (
 //go:embed assets/periodic-rds-compliance.yaml
 var periodicRDSComplianceYAML []byte
 
+//go:embed assets/periodic-low-latency-check.yaml
+var periodicLowLatencyCheckYAML []byte
+
 type systemPeriodicAsset struct {
 	yaml    []byte
 	enabled func(ranv1alpha1.PeriodicHealthChecksSpec) bool
@@ -30,6 +33,7 @@ type systemPeriodicAsset struct {
 
 var systemPeriodicAssets = []systemPeriodicAsset{
 	{yaml: periodicRDSComplianceYAML, enabled: func(p ranv1alpha1.PeriodicHealthChecksSpec) bool { return p.RDSCompliance.Enabled }},
+	{yaml: periodicLowLatencyCheckYAML, enabled: func(p ranv1alpha1.PeriodicHealthChecksSpec) bool { return p.LowLatencyCheck.Enabled }},
 }
 
 func decodeSystemPeriodicCM(data []byte) (corev1.ConfigMap, error) {

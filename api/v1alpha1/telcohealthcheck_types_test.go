@@ -10,6 +10,10 @@ import (
 func TestTelcoHealthcheckDeepCopy(t *testing.T) {
 	period := metav1.Duration{Duration: 5 * time.Minute}
 	rdsPeriod := metav1.Duration{Duration: 10 * time.Minute}
+	lowPeriod := metav1.Duration{Duration: 15 * time.Minute}
+	lowMinJitter := metav1.Duration{Duration: time.Minute}
+	lowMaxJitter := metav1.Duration{Duration: 2 * time.Minute}
+	lastLowRun := metav1.Now()
 
 	original := &TelcoHealthcheck{
 		ObjectMeta: metav1.ObjectMeta{
@@ -30,8 +34,12 @@ func TestTelcoHealthcheckDeepCopy(t *testing.T) {
 					Period:  &rdsPeriod,
 					Enabled: true,
 				},
+				LowLatencyCheck: LowLatencyCheckSpec{
+					Period: &lowPeriod, MinJitter: &lowMinJitter, MaxJitter: &lowMaxJitter, Enabled: true,
+				},
 			},
 		},
+		Status: TelcoHealthcheckStatus{LastLowLatencyCheckRunTime: &lastLowRun},
 	}
 
 	copy := original.DeepCopy()
@@ -57,6 +65,14 @@ func TestTelcoHealthcheckDeepCopy(t *testing.T) {
 
 	if copy.Spec.PeriodicHealthChecks.RDSCompliance.Period == original.Spec.PeriodicHealthChecks.RDSCompliance.Period {
 		t.Error("DeepCopy did not produce an independent copy of RDSCompliance.Period pointer")
+	}
+	check := copy.Spec.PeriodicHealthChecks.LowLatencyCheck
+	originalCheck := original.Spec.PeriodicHealthChecks.LowLatencyCheck
+	if check.Period == originalCheck.Period || check.MinJitter == originalCheck.MinJitter || check.MaxJitter == originalCheck.MaxJitter {
+		t.Error("DeepCopy did not produce independent low-latency overrides")
+	}
+	if copy.Status.LastLowLatencyCheckRunTime == original.Status.LastLowLatencyCheckRunTime {
+		t.Error("DeepCopy did not produce an independent low-latency status timestamp")
 	}
 }
 

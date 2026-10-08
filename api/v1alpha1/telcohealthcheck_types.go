@@ -60,9 +60,27 @@ type RDSComplianceSpec struct {
 	MaxJitter *metav1.Duration `json:"maxJitter,omitempty"`
 }
 
+// LowLatencyCheckSpec configures periodic low-latency readiness checks.
+type LowLatencyCheckSpec struct {
+	// Period overrides the default check interval for low-latency checks.
+	// +optional
+	Period *metav1.Duration `json:"period,omitempty"`
+	// Enabled activates low-latency checks when true.
+	Enabled bool `json:"enabled"`
+	// MinJitter overrides the global minimum per-cluster creation delay.
+	// +optional
+	// +kubebuilder:validation:XValidation:rule="duration(self) >= duration('0s')",message="minJitter must be non-negative"
+	MinJitter *metav1.Duration `json:"minJitter,omitempty"`
+	// MaxJitter overrides the global maximum per-cluster creation delay.
+	// +optional
+	// +kubebuilder:validation:XValidation:rule="duration(self) >= duration('0s')",message="maxJitter must be non-negative"
+	MaxJitter *metav1.Duration `json:"maxJitter,omitempty"`
+}
+
 // PeriodicHealthChecksSpec defines the schedule for periodic agentic health checks.
 // +kubebuilder:validation:XValidation:rule="duration(has(self.minJitter) ? self.minJitter : '30s') <= duration(has(self.maxJitter) ? self.maxJitter : '5m')",message="effective global minJitter must be less than or equal to maxJitter"
 // +kubebuilder:validation:XValidation:rule="!has(self.rdsCompliance) || duration(has(self.rdsCompliance.minJitter) ? self.rdsCompliance.minJitter : (has(self.minJitter) ? self.minJitter : '30s')) <= duration(has(self.rdsCompliance.maxJitter) ? self.rdsCompliance.maxJitter : (has(self.maxJitter) ? self.maxJitter : '5m'))",message="effective RDS compliance minJitter must be less than or equal to maxJitter"
+// +kubebuilder:validation:XValidation:rule="!has(self.lowLatencyCheck) || duration(has(self.lowLatencyCheck.minJitter) ? self.lowLatencyCheck.minJitter : (has(self.minJitter) ? self.minJitter : '30s')) <= duration(has(self.lowLatencyCheck.maxJitter) ? self.lowLatencyCheck.maxJitter : (has(self.maxJitter) ? self.maxJitter : '5m'))",message="effective low-latency check minJitter must be less than or equal to maxJitter"
 type PeriodicHealthChecksSpec struct {
 	// Period is the default interval between periodic health checks across all clusters.
 	Period metav1.Duration `json:"period"`
@@ -79,6 +97,9 @@ type PeriodicHealthChecksSpec struct {
 	// RDSCompliance configures the RDS compliance check schedule and enablement.
 	// +optional
 	RDSCompliance RDSComplianceSpec `json:"rdsCompliance,omitempty"`
+	// LowLatencyCheck configures the low-latency readiness check schedule and enablement.
+	// +optional
+	LowLatencyCheck LowLatencyCheckSpec `json:"lowLatencyCheck,omitempty"`
 }
 
 // AlertManagerAuthType selects how the controller authenticates to an external Alertmanager.
@@ -155,6 +176,9 @@ type TelcoHealthcheckStatus struct {
 	// LastRDSComplianceRunTime records when the last RDS compliance check was triggered.
 	// +optional
 	LastRDSComplianceRunTime *metav1.Time `json:"lastRDSComplianceRunTime,omitempty"`
+	// LastLowLatencyCheckRunTime records when the last low-latency check was triggered.
+	// +optional
+	LastLowLatencyCheckRunTime *metav1.Time `json:"lastLowLatencyCheckRunTime,omitempty"`
 }
 
 // +kubebuilder:object:root=true
