@@ -1,121 +1,72 @@
 # lightspeed-hub Integration: Remove Direct Spoke Cluster Connections
 
-## Context
+## Context and upstream contract
 
-The operator currently maintains its own spoke cluster connections: it fetches per-cluster `<name>-admin-kubeconfig` Secrets, builds dynamic clients, creates `AgenticRun` resources in `openshift-lightspeed` on each spoke, and runs a `SpokeWatchManager` goroutine pool to watch AgenticRun/AnalysisResult objects on spoke clusters and relay status back to hub-side `TelcoHealthCheckRun` records.
+The operator currently reads `<name>-admin-kubeconfig` Secrets on the hub, creates `AgenticRun` resources on spokes, and uses `SpokeWatchManager` to relay spoke AgenticRun/AnalysisResult status into hub `TelcoHealthCheckRun` records. `lightspeed-hub` and the `lightspeed-agentic-operator` are intended to move AgenticRuns to `openshift-lightspeed` **on the hub**: `spec.targetCluster` names the ACM spoke, while lightspeed-hub provisions a standing `spoke-kubeconfig-{name}` Secret for the agentic operator. Our controller and alert receiver should neither read that Secret nor connect directly to spokes.
 
-The `lightspeed-agentic-operator` (with `lightspeed-hub` as a companion operator) introduces `AgenticRun.spec.targetCluster`, which lets AgenticRuns be created on the **hub** cluster while the agentic-operator transparently handles spoke connectivity via a standing kubeconfig Secret (`spoke-kubeconfig-{name}`) provisioned by `lightspeed-hub`. This removes all need for the telco-anomaly-detection operator to manage its own spoke credentials or connections.
+Before implementing the status migration, verify against the versions to be deployed:
 
----
+- The hub AgenticRun CRD accepts `spec.targetCluster` (its validation, required/optional status, and namespace), and the agentic operator's expected `SpokeCluster`/standing-Secret readiness contract. Document the exact supported versions.
+- Where `AnalysisResult` objects are created for hub AgenticRuns, their API version, the field linking them to an AgenticRun, and the status fields used below. Hub-local AnalysisResult watches only work if results also exist on the hub. If they do not, agree on a different hub-visible status source before removing the spoke watcher.
+- Whether a missing/not-ready standing Secret rejects the AgenticRun CREATE request or permits creation followed by a failed status. Record the observed behavior; a successful Kubernetes CREATE must not be reported as a successful investigation.
 
-## Current Architecture (to be removed)
+**Operational prerequisite:** install lightspeed-hub and a compatible lightspeed-agentic-operator on the hub, create a `SpokeCluster` for each monitored ACM ManagedCluster, and wait for readiness. Do not add a startup dependency on these resources to the telco operator. Surface a missing dependency through creation failure or the eventual hub run status, as appropriate to the verified contract.
 
-| Component | Spoke interaction |
-|---|---|
-| `internal/controller/agenticrun.go` | `createAgenticRunForCluster()` fetches kubeconfig Secret, builds spoke `controller-runtime` client, calls `spokeClient.Create()` |
-| `internal/controller/managedcluster.go` | `getClusterKubeconfig()`, `buildSpokeClient()` utilities |
-| `internal/controller/spokewatchmanager.go` | Per-cluster goroutines watching AgenticRun + AnalysisResult on spokes via dynamic client; updates TelcoHealthCheckRun status on hub |
-| `internal/alertreceiver/handler.go` | `fetchKubeconfig()`, builds spoke dynamic client, calls `spokeClient.Resource().Create()` |
-| RBAC | Get/list Secrets in spoke namespaces (`<clusterName>-admin-kubeconfig`) |
+## Implementation plan
 
----
+### 1. AgenticRun model and builder (`internal/agenticrun/`)
 
-## New Architecture
+- Add `TargetCluster string` with the appropriate JSON tag to `AgenticRunSpec` in `types.go`; change the `Namespace` comment to say **on the hub**. Keep its value `openshift-lightspeed`.
+- Add a `clusterName` argument to `BuildObject()` in `build.go` and write `spec.targetCluster`. Update all callers and builder tests; cover both the target cluster and the existing request, analysis/execution, labels, skills, and MCP server fields.
+- `BuildVarMap()` **already** accepts only hub client, operator namespace, and cluster name; it requires no spoke-connectivity change. Preserve `${CLUSTER_NAME}`, alert-only `${NODE_NAME}`, and the hub-local `${KUBE_COMPARE_MCP_URL}` Route lookup.
 
-AgenticRuns are created on the **hub** cluster in the `openshift-lightspeed` namespace with `spec.targetCluster` set to the ACM ManagedCluster name. The `lightspeed-agentic-operator` reads the standing Secret `spoke-kubeconfig-{targetCluster}` (provisioned by `lightspeed-hub`) and handles all spoke interaction internally, including ephemeral RBAC provisioning on the spoke and sandbox pod kubeconfig injection.
+### 2. Periodic creation (`internal/controller/agenticrun.go`)
 
-Status relay (currently done by `SpokeWatchManager`) is replaced by a standard controller-runtime `Watch` on AgenticRun and AnalysisResult resources in `openshift-lightspeed` on the hub cluster. When those objects change, the TelcoHealthCheckRun reconciler is enqueued and reads `spec.targetCluster` from the linked AgenticRun to confirm `status.clusterName`.
+- Remove `getClusterKubeconfig()` and `buildSpokeClient()` calls; create each built AgenticRun with the hub client in `openshift-lightspeed`. Keep per-cluster jitter and the pending-record-before-create, confirm/fail flow.
+- **Generate a distinct AgenticRun name per target cluster.** Currently one interval shares a name across spokes; on the hub the second CREATE would collide. Choose a DNS-valid, at-most-253-character deterministic per-cluster suffix (hash/truncate long names as needed). Derive each `TelcoHealthCheckRun` name and its `status.agenticRunName` from that actual AgenticRun name, and update `healthcheckrun.Name()` usage and tests. Preserve the existing alert naming scheme unless a collision concern is found there.
+- Keep `healthcheckrun.Begin()` setting `status.clusterName` before creation. Require the hub status sync to compare it with `spec.targetCluster`; on mismatch, log and refuse to copy status rather than silently changing the audit identity. Existing `healthcheckrun.Key(cluster, runName)` labels can still be used for correlation if both sides use the new name consistently.
+- Preserve handling of definitive versus ambiguous CREATE failures: do not create a second run when the response might have been lost.
 
-**Prerequisite (ops concern):** `lightspeed-hub` must be installed and a `SpokeCluster` CR must exist for each ACM ManagedCluster the operator monitors. The operator does not need to validate this at startup — `AgenticRun` creation will fail naturally if the standing kubeconfig Secret is absent.
+### 3. Alert receiver (`internal/alertreceiver/handler.go`)
 
----
+- The receiver runs in a **separate pod** and already has its own hub in-cluster client. Remove `fetchKubeconfig()`, the pre-fetched kubeconfig map in `getMonitoredClusters()`/`processAlerts()`, `NewSpokeClient`, and related client builders. Keep monitored-cluster and alert-name validation.
+- Resolve the alert ConfigMap, load/expand its config, and call the new `BuildObject()` with the validated cluster name. Use `h.HubClient.Create()` in the hub's `openshift-lightspeed` namespace after `healthcheckrun.Begin()`. Keep existing confirm/fail and per-alert error isolation. Update handler and server tests.
 
-## Implementation Plan
+### 4. Pending-record recovery and legacy records (`internal/controller/runrecovery.go`)
 
-### 1. `internal/agenticrun/types.go`
+- Replace kubeconfig fetch/spoke client/Get with a hub Get of the named AgenticRun in `openshift-lightspeed`. Check `spec.targetCluster` against the record's `status.clusterName` before confirming it; handle a mismatch explicitly rather than pairing the wrong run. Preserve the grace period, definitive absence, ambiguous read-error retry, and incomplete-record behavior.
+- Define an upgrade policy for records created **before** this migration: old spoke runs are not visible through a hub Get. In particular, do not turn an old pending spoke record into a false `Failed` hub-create record. Document and test the chosen cutover (for example, drain pending records before upgrading and leave completed legacy records as historical snapshots). No direct spoke connection should remain in the new steady state.
 
-- Add `TargetCluster string` to `AgenticRunSpec`.
-- Update the comment on the `Namespace` constant: AgenticRuns are now created in `openshift-lightspeed` **on the hub cluster** (not on spokes). The constant value itself is unchanged.
+### 5. Replace `SpokeWatchManager` with hub-local status reconciliation
 
-### 2. `internal/agenticrun/build.go`
+- Remove `internal/controller/spokewatchmanager.go`, its manager runnable, `SpokeWatches` field, sync/stop/ready checks, and the `<clusterName>-admin-kubeconfig` Secret watch from `telcohealthcheck_controller.go`. Keep the watch for pending `TelcoHealthCheckRun` records that triggers recovery, or move recovery to a run-record controller with equivalent retries.
+- Add a run-record **status reconciler** (or extend the existing `runAlertReconciler`) that actually reconciles `TelcoHealthCheckRun` keys. Do not enqueue run-record keys onto the `TelcoHealthcheck` singleton reconciler. Register controller-runtime hub watches for `AgenticRun` and, subject to the upstream contract, `AnalysisResult` in `openshift-lightspeed`. Configure unstructured GVK/list types and cache scope as required by controller-runtime; limit event handling to this namespace and this operator's runs.
+- Map an AgenticRun event by `(spec.targetCluster, metadata.name)` to the record's existing `ran.openshift.io/run-key` label, then verify `status.clusterName` and `status.agenticRunName` before enqueuing/updating. Map an AnalysisResult via its verified AgenticRun reference: read the corresponding hub AgenticRun to obtain `spec.targetCluster`, then resolve the same record. Do not match on run name alone. Handle objects arriving before their record, replay after restart, watch deletions, API errors, and retries without losing final status.
+- Reconcile the **current** AgenticRun and result state together, not solely the last watch event, to avoid ordering races. Preserve the current `TelcoHealthCheckRun` semantics: `agenticRunStatus.type` is the type of the latest condition with a valid transition timestamp; `.phase` is that condition's **reason**, not AgenticRun `status.phase`. Keep `Pending`/`Created`/`Failed` until a condition is available. Keep the summary fallbacks (`status.diagnosis.summary`, options, failure reason), `Analyzed`-only `actionRequired`, resetting to `False` on another non-empty type, and re-reading the result when returning to `Analyzed`.
+- Patch record status with optimistic-lock/retry semantics, and call `queueActionAlert()` in the **same patch** as any change to action-required so external Alertmanager firing/resolution delivery remains durable. Coordinate with the existing `runAlertReconciler` to avoid dropping its notification queue or introducing status-patch loops. Retain historical records when clusters cease being monitored.
 
-- Update `BuildObject()` signature to accept `clusterName string` and set `spec.targetCluster = clusterName` in the returned unstructured object.
-- `BuildVarMap()` currently receives spoke-connectivity context (kubeconfig bytes, spoke URL); remove any spoke-specific arguments. `CLUSTER_NAME` stays (it appears in LLM prompts). `KUBE_COMPARE_MCP_URL` stays (it is a hub-local MCP server URL).
-- AgenticRun namespace stays `openshift-lightspeed`.
+### 6. Remaining cluster discovery and console links
 
-### 3. `internal/controller/agenticrun.go`
+- Remove `getClusterKubeconfig()` from `internal/controller/managedcluster.go` and all old spoke-client helpers. Keep ManagedCluster list resolution and include/exclude logic.
+- Review `runAlertReconciler.agenticRunURL()`: it currently builds a **spoke** console URL from a ManagedCluster claim. Determine the correct hub console deep-link for a hub-resident AgenticRun; update the URL or omit the annotation when a valid hub URL is unavailable. Update link tests and docs.
 
-- `createAgenticRunForCluster(clusterName string)`: remove the `getClusterKubeconfig()` + `buildSpokeClient()` calls. Pass `clusterName` to `agenticrun.BuildObject()` so it becomes `spec.targetCluster`. Create the AgenticRun with `r.Client` (hub in-cluster client) in `openshift-lightspeed` on the hub. Run name format and namespace are unchanged.
-- Remove the now-unused `buildSpokeClient()` helper.
-- The per-cluster jitter/goroutine logic for rate-limiting is not spoke-specific; keep it.
+### 7. RBAC and cache configuration (`config/rbac/`, RBAC markers, manager setup)
 
-### 4. `internal/controller/managedcluster.go`
+- Remove permissions used **only** to read `<clusterName>-admin-kubeconfig` Secrets and delete that Secret watch. Do **not** delete all Secret permissions: the controller still reads/updates `open-cluster-management-observability/alertmanager-config`; kube-compare-mcp reads `openshift-config/pull-secret` and manages `telco-healthcheck-system/kube-compare-registry-credentials`; optional outbound Alertmanager delivery reads a credentials Secret in the operator namespace and watches it for rotation.
+- Scope those remaining Secret permissions by namespace and operation where practical; consider `resourceNames` for named Get/Update operations. The current generated ClusterRole/ClusterRoleBinding grants cluster-wide Secret create/delete/get/list/patch/update/watch. A namespace Role/RoleBinding and/or narrowly bound ClusterRole may be needed, in addition to edits to the generating kubebuilder markers. **Plan the controller-runtime Secret cache/watch alongside RBAC**: a namespace-limited binding alone does not authorize an all-namespaces informer. Use appropriately scoped cache selectors or uncached reads for point Gets, and keep the credentials-rotation watch working. Check both controller and receiver ServiceAccount usage before narrowing their shared binding.
+- Add hub `agenticruns.agentic.openshift.io` create/get/list/watch for creation, recovery, and status watch; add hub `analysisresults.agentic.openshift.io` get/list/watch if the upstream contract confirms they are hub-resident. Limit these permissions to `openshift-lightspeed` where feasible and account for the manager cache's actual list/watch scope. Update RBAC markers and any hand-maintained Role/RoleBinding manifests, run `make manifests`, and inspect generated output for unwanted broad Secret permissions or overwritten scoping.
 
-- Remove `getClusterKubeconfig()`.
-- Remove `buildSpokeClient()`.
-- All remaining code (cluster list resolution via ACM ManagedCluster CRs, include/exclude logic) is unaffected.
+### 8. Documentation and tests
 
-### 5. `internal/controller/spokewatchmanager.go` — remove entirely
-
-Replace with a hub-local watch registered in `SetupWithManager()`. The watch enqueues TelcoHealthCheckRun reconciliation when AgenticRun objects change:
-
-```go
-.Watches(
-    &unstructured.Unstructured{Object: map[string]interface{}{
-        "apiVersion": "agentic.openshift.io/v1alpha1",
-        "kind":       "AgenticRun",
-    }},
-    handler.EnqueueRequestsFromMapFunc(agenticRunToTelcoHealthCheckRun),
-    builder.WithPredicates(predicate.ResourceVersionChangedPredicate{}),
-)
-```
-
-`agenticRunToTelcoHealthCheckRun` is a new mapper that, given an AgenticRun in `openshift-lightspeed`, finds the `TelcoHealthCheckRun` in `telco-healthcheck-system` whose `status.agenticRunName` matches the AgenticRun name, and enqueues it for reconciliation.
-
-The TelcoHealthCheckRun reconciler (or a dedicated sub-reconciler) then reads:
-
-- `spec.targetCluster` from the AgenticRun → confirms/sets `status.clusterName`
-- AgenticRun `status.phase` → updates `status.agenticRunStatus.phase`
-- AnalysisResult `status.diagnosis.summary` and `status.actionRequired` → updates corresponding TelcoHealthCheckRun fields
-
-An analogous watch on `AnalysisResult` (also in `openshift-lightspeed`) is added for the summary and actionRequired fields.
-
-The `agenticRunURL()` helper (builds console deep-links from ManagedCluster claims) does not require spoke access; it can be kept as-is since it reads ManagedCluster objects on the hub.
-
-### 6. `internal/alertreceiver/handler.go`
-
-- Remove `fetchKubeconfig()` and the spoke dynamic client creation block inside `createAgenticRunOnCluster()`.
-- The alert receiver runs inside the operator pod and already has in-cluster access. Use the hub in-cluster client to create AgenticRuns in `openshift-lightspeed` with `spec.targetCluster = clusterName`.
-- Remove the kubeconfig map that was pre-fetched per-cluster in `processAlerts()`.
-- `resolveAlertConfigMap()`, `LoadRunConfig()`, `BuildVarMap()`, `ExpandVariables()`, `BuildObject()` calls remain; only the final create target changes from spoke to hub.
-
-### 7. `TelcoHealthCheckRun.status.clusterName` derivation
-
-`status.clusterName` is currently set eagerly in `healthcheckrun.Begin()` from the cluster-name loop variable. This is preserved: the caller still passes `clusterName`, which is the same value set as `spec.targetCluster` in the AgenticRun. The derivation requirement is satisfied because the hub watch handler reads `spec.targetCluster` when syncing AgenticRun status back to TelcoHealthCheckRun, ensuring the two are always consistent. No changes to `healthcheckrun.Begin()` are required.
-
-### 8. RBAC (`config/rbac/`)
-
-- **Remove:** `get`/`list` on Secrets in spoke namespaces (the `<clusterName>-admin-kubeconfig` permission).
-- **Add (if not already present):** `create`/`get`/`list`/`watch` on `agenticruns` in the `openshift-lightspeed` namespace.
-- **Add:** `get`/`list`/`watch` on `analysisresults` in `openshift-lightspeed`.
-- Adjust kubebuilder RBAC markers accordingly and re-run `make manifests`.
-
-### 9. Documentation
-
-- **`docs/architecture.md`**: major update — replace all spoke-client, kubeconfig Secret, and SpokeWatchManager sections. Add a lightspeed-hub prerequisite section explaining SpokeCluster CRs and the standing kubeconfig Secret mechanism. Update the AgenticRun creation flow to show hub-local creation with `spec.targetCluster`. Update the RBAC section.
-- **`README.md`**: update prerequisites to include `lightspeed-hub` installation and `SpokeCluster` CR creation per managed cluster; remove setup steps about spoke kubeconfig Secrets.
-- **`steps.md`**: add a new phase entry for this work.
-
----
+- Update `docs/architecture.md` and `README.md`: hub-resident runs/results, `spec.targetCluster`, lightspeed-hub/SpokeCluster prerequisites, unique run names, status mapping, pending recovery, console URL, namespaces, and scoped Secret permissions. Remove obsolete spoke kubeconfig and SpokeWatchManager descriptions. Add a phase in `steps.md`.
+- Update spoke-client-dependent tests in `internal/controller/` and `internal/alertreceiver/`. Cover two clusters in the same periodic interval; alert-driven hub creation; ambiguous create and hub recovery; missing/mismatched target cluster; result/condition event ordering and replay; action-required firing and resolution; and Secret-cache/RBAC behavior where integration tests can exercise it.
 
 ## Verification
 
-1. Install `lightspeed-hub` and `lightspeed-agentic-operator` on the hub cluster. Create a `SpokeCluster` CR for at least one spoke and wait until it reaches `Ready=True`.
-2. Apply the updated operator manifests (`make deploy`).
-3. Create the singleton `TelcoHealthcheck` CR with `managedClusters.include` containing the spoke name.
-4. Trigger a periodic check (set a short `periodicHealthChecks.period`); confirm an `AgenticRun` with `spec.targetCluster = <spoke-name>` appears in `openshift-lightspeed` on the **hub**.
-5. Confirm no kubeconfig Secrets are fetched from spoke namespaces (check operator pod logs and audit log).
-6. Confirm a `TelcoHealthCheckRun` record appears in `telco-healthcheck-system` with `status.clusterName = <spoke-name>`.
-7. Confirm `status.agenticRunStatus.phase` updates as the AgenticRun progresses (via hub-local watch).
-8. Trigger an alert via the webhook and verify the same flow for alert-driven AgenticRuns.
-9. Run `make test` and `make lint`.
+1. Confirm the upstream CRD/result/Secret behavior and version compatibility above. Install lightspeed-hub and the agentic operator on the hub, create a `SpokeCluster` for at least two ACM spokes, and wait for readiness.
+2. Apply manifests with `make deploy`. Verify the controller and receiver can read the specific Secrets they need and cannot read unrelated spoke admin kubeconfigs; confirm watches start without RBAC errors.
+3. Create the singleton `TelcoHealthcheck` with both spokes included. Set a short `periodicHealthChecks.period`, **enable** `rdsCompliance` or `lowLatencyCheck`, and use `0s`/`0s` jitter if immediate verification is needed.
+4. Verify **two differently named** hub AgenticRuns in `openshift-lightspeed`, each with the correct `spec.targetCluster`, and two corresponding hub `TelcoHealthCheckRun` records with matching identities. Verify no operator requests to spoke API servers or spoke admin-kubeconfig Secrets.
+5. Follow condition changes and AnalysisResult updates through record type, phase, summary, and action-required fields. Check external Alertmanager firing/resolution if configured; restart the controller and confirm reconciliation recovers current state.
+6. Trigger an alert through the webhook and verify the same hub-local create/status flow. Exercise missing/not-ready lightspeed-hub prerequisites and verify the recorded behavior matches the upstream contract.
+7. Run `make test`, `make lint`, and `make vet`; inspect generated RBAC and documentation changes.
