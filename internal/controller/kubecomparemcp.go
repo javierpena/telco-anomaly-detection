@@ -29,7 +29,6 @@ const (
 	kubeCompareFieldOwner         = "telco-anomaly-operator"
 )
 
-// +kubebuilder:rbac:groups="",resources=secrets,verbs=create;delete
 // +kubebuilder:rbac:groups="",resources=serviceaccounts,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=services,verbs=get;list;watch;create;update;patch;delete

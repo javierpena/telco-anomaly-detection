@@ -38,7 +38,8 @@ spec:
     name: v1alpha1
     schema:
       openAPIV3Schema:
-        description: TelcoHealthCheckRun is a hub-side audit record of a spoke AgenticRun.
+        description: TelcoHealthCheckRun is a hub-side audit record of a targeted
+          hub AgenticRun.
         properties:
           apiVersion:
             description: |-
@@ -62,8 +63,8 @@ spec:
               by the operator.
             type: object
           status:
-            description: TelcoHealthCheckRunStatus identifies the spoke run and records
-              its observed result.
+            description: TelcoHealthCheckRunStatus identifies the hub run and target
+              spoke and records its observed result.
             properties:
               agenticRunActionRequired:
                 description: |-
@@ -79,12 +80,12 @@ spec:
                 type: string
               agenticRunStatus:
                 description: |-
-                  AgenticRunStatus tracks spoke creation, then the latest AgenticRun condition
+                  AgenticRunStatus tracks hub creation, then the latest AgenticRun condition
                   type and reason, and the AnalysisResult conclusion.
                 properties:
                   phase:
                     description: |-
-                      Phase is Pending during spoke creation, Created or Failed once its outcome
+                      Phase is Pending during hub creation, Created or Failed once its outcome
                       is known, then the reason of the latest AgenticRun condition.
                     type: string
                   summary:

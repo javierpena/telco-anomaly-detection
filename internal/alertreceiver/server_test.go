@@ -8,16 +8,13 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 // minimalHandler returns a Handler whose HubClient list always returns empty
 // (no TelcoHealthchecks → no monitored clusters → all alerts skipped).
 func minimalHandler() *Handler {
 	return &Handler{
-		HubClient:      nil, // overridden by getMonitoredClusters returning empty
-		NewSpokeClient: nil,
+		HubClient: nil,
 	}
 }
 
@@ -56,12 +53,7 @@ func TestHandleWebhook_EmptyAlerts(t *testing.T) {
 	// We need a real (fake) hub client; nil panics on List.
 	// Use a handler that overrides getMonitoredClusters via a nil-safe stub.
 	// Here we test the JSON parsing and routing layer only.
-	h := &Handler{
-		HubClient: nil,
-		NewSpokeClient: func(_ []byte) (client.Client, error) {
-			return nil, nil
-		},
-	}
+	h := &Handler{HubClient: nil}
 
 	req := httptest.NewRequest(http.MethodPost, "/webhook", bytes.NewReader(body))
 	rec := httptest.NewRecorder()

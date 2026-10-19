@@ -1,6 +1,6 @@
 # Adding a New Periodic Health Check
 
-Periodic health checks create an `AgenticRun` on every monitored spoke cluster each time a configured interval elapses. This document covers adding a new check type as a packaged part of the operator (a _system periodic check_). The process requires a code change and an operator release.
+Periodic health checks create a distinct hub `AgenticRun` targeting every monitored spoke cluster each time a configured interval elapses. This document covers adding a new check type as a packaged part of the operator (a _system periodic check_). The process requires a code change and an operator release.
 
 ---
 
@@ -18,10 +18,10 @@ System-periodic ConfigMap (embedded asset in binary)
 createAgenticRunsForClusters
         │  for each monitored spoke cluster
         ▼
-AgenticRun created in openshift-lightspeed on spoke
+AgenticRun created in openshift-lightspeed on hub with spec.targetCluster set
 ```
 
-On each reconcile the controller checks whether the check's period has elapsed. If it has, it validates the AgenticRun configuration from the corresponding ConfigMap (request prompt, skills, MCP servers), claims the interval in status, then schedules an `AgenticRun` on each spoke cluster. Each cluster waits an independent delay in the effective jitter window (30s–5m by default) before variable expansion and creation; `0s`/`0s` is synchronous. Delayed tasks are canceled on controller shutdown, so a claimed interval can be skipped if the controller stops during the wait.
+On each reconcile the controller checks whether the check's period has elapsed. If it has, it validates the AgenticRun configuration from the corresponding ConfigMap (request prompt, skills, MCP servers), claims the interval in status, then schedules a uniquely named hub `AgenticRun` targeting each spoke cluster. Each cluster waits an independent delay in the effective jitter window (30s–5m by default) before variable expansion and creation; `0s`/`0s` is synchronous. Delayed tasks are canceled on controller shutdown, so a claimed interval can be skipped if the controller stops during the wait.
 
 The ConfigMap is managed by `reconcileSystemPeriodicConfigMaps`: when the spec boolean is `true` the ConfigMap is created or updated from the embedded asset; when `false` it is deleted. On CR deletion `cleanupSystemPeriodicConfigMaps` removes it unconditionally.
 

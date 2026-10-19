@@ -4,8 +4,6 @@ import (
 	"context"
 	"fmt"
 
-	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/types"
 	clusterv1 "open-cluster-management.io/api/cluster/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -58,31 +56,4 @@ func getMonitoredClusters(ctx context.Context, c client.Client, spec ranv1alpha1
 
 	logger.Info("resolved monitored clusters", "count", len(monitored))
 	return monitored, nil
-}
-
-// getClusterKubeconfig retrieves the admin kubeconfig bytes for the named managed cluster.
-// The kubeconfig is stored in a Secret named <clusterName>-admin-kubeconfig in the
-// namespace that matches the cluster name.
-func getClusterKubeconfig(ctx context.Context, c client.Client, clusterName string) ([]byte, error) {
-	logger := log.FromContext(ctx)
-	logger.V(1).Info("fetching kubeconfig", "cluster", clusterName)
-
-	secretKey := types.NamespacedName{
-		Namespace: clusterName,
-		Name:      clusterName + "-admin-kubeconfig",
-	}
-	secret := &corev1.Secret{}
-	if err := c.Get(ctx, secretKey, secret); err != nil {
-		return nil, fmt.Errorf("getting kubeconfig secret %s/%s: %w",
-			secretKey.Namespace, secretKey.Name, err)
-	}
-
-	kubeconfig, ok := secret.Data["kubeconfig"]
-	if !ok {
-		return nil, fmt.Errorf("key 'kubeconfig' not found in secret %s/%s",
-			secretKey.Namespace, secretKey.Name)
-	}
-
-	logger.V(1).Info("fetched kubeconfig", "cluster", clusterName, "bytes", len(kubeconfig))
-	return kubeconfig, nil
 }

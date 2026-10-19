@@ -2,12 +2,12 @@ package controller
 
 import (
 	"context"
+	"crypto/sha256"
 	"fmt"
 	"math/rand"
+	"strings"
 	"time"
 
-	"k8s.io/client-go/rest"
-	"k8s.io/client-go/tools/clientcmd"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -26,8 +26,8 @@ var checkTypeConfigMaps = map[string]string{
 	"low-latency-check": "telco-anomaly-low-latency-check-config",
 }
 
-// createAgenticRunsForClusters creates an AgenticRun on each listed managed cluster.
-// Clusters that fail (kubeconfig fetch or AgenticRun creation) are logged and skipped;
+// createAgenticRunsForClusters creates a hub AgenticRun targeting each listed cluster.
+// Clusters that fail creation are logged and skipped;
 // errors are non-fatal to allow the others to proceed.
 func createAgenticRunsForClusters(
 	ctx context.Context,
@@ -77,9 +77,10 @@ func createAgenticRunsForClustersWithConfig(
 	logger.Info("scheduling AgenticRun resources", "checkType", checkType, "clusterCount", len(monitoredClusters),
 		"minJitter", minJitter, "maxJitter", maxJitter)
 
-	runName := fmt.Sprintf("telco-health-%s-%d", checkType, time.Now().UnixNano())
+	runPrefix := fmt.Sprintf("telco-health-%s-%d", checkType, time.Now().UnixNano())
 
 	for _, clusterName := range monitoredClusters {
+		runName := periodicRunName(runPrefix, clusterName)
 		if maxJitter == 0 {
 			createAgenticRunForCluster(ctx, c, thc, clusterName, checkType, cfg, runName)
 			continue
@@ -103,6 +104,21 @@ func createAgenticRunsForClustersWithConfig(
 	return nil
 }
 
+// periodicRunName fits Kubernetes' DNS subdomain limit while retaining a
+// readable cluster prefix and a stable digest of the entire cluster identity.
+func periodicRunName(prefix, cluster string) string {
+	sum := sha256.Sum256([]byte(cluster))
+	clusterPart := strings.TrimRight(cluster, "-.")
+	if len(clusterPart) > 40 {
+		clusterPart = strings.TrimRight(clusterPart[:40], "-.")
+	}
+	suffix := fmt.Sprintf("-%s-%x", clusterPart, sum[:8])
+	if len(prefix)+len(suffix) > 253 {
+		prefix = strings.TrimRight(prefix[:253-len(suffix)], "-.")
+	}
+	return prefix + suffix
+}
+
 func randomJitter(minJitter, maxJitter time.Duration) time.Duration {
 	// Int63 covers the only case where window+1 would overflow.
 	window := maxJitter - minJitter
@@ -112,26 +128,14 @@ func randomJitter(minJitter, maxJitter time.Duration) time.Duration {
 	return minJitter + time.Duration(rand.Int63n(int64(window)+1))
 }
 
-// createAgenticRunForCluster persists the run identity before creating the spoke
-// object, preserving the recovery behavior for ambiguous spoke create errors.
+// createAgenticRunForCluster persists the run identity before creating the hub
+// object, preserving recovery behavior for ambiguous create errors.
 func createAgenticRunForCluster(
 	ctx context.Context, c client.Client, thc *ranv1alpha1.TelcoHealthcheck,
 	clusterName, checkType string, cfg *agenticrun.RunConfig, runName string,
 ) {
 	logger := log.FromContext(ctx)
 	logger.V(1).Info("processing cluster", "cluster", clusterName, "checkType", checkType)
-
-	kubeconfig, err := getClusterKubeconfig(ctx, c, clusterName)
-	if err != nil {
-		logger.Error(err, "failed to get kubeconfig, skipping cluster", "cluster", clusterName)
-		return
-	}
-
-	spokeClient, err := buildSpokeClient(kubeconfig)
-	if err != nil {
-		logger.Error(err, "failed to build spoke client, skipping cluster", "cluster", clusterName)
-		return
-	}
 
 	vars, err := agenticrun.BuildVarMap(ctx, c, operatorNamespace, clusterName)
 	if err != nil {
@@ -144,21 +148,21 @@ func createAgenticRunForCluster(
 		"app.kubernetes.io/managed-by":     "telco-anomaly-detection",
 		"telco-anomaly.io/healthcheck-ref": thc.Name,
 	}
-	run, err := agenticrun.BuildObject(runName, labels, expanded)
+	run, err := agenticrun.BuildObject(runName, clusterName, labels, expanded)
 	if err != nil {
 		logger.Error(err, "failed to build AgenticRun object, skipping cluster", "cluster", clusterName)
 		return
 	}
-	recordName := healthcheckrun.Name(runName, clusterName, true)
+	recordName := runName
 	if _, err := healthcheckrun.Begin(ctx, c, operatorNamespace, recordName, runName,
 		clusterName, ranv1alpha1.TriggerTypePeriodicHealthCheck, checkType, thc); err != nil {
-		logger.Error(err, "failed to persist run identity, skipping spoke creation", "cluster", clusterName)
+		logger.Error(err, "failed to persist run identity, skipping hub creation", "cluster", clusterName)
 		return
 	}
-	if err := spokeClient.Create(ctx, run); err != nil {
+	if err := c.Create(ctx, run); err != nil {
 		if healthcheckrun.DefinitiveCreateError(err) {
 			if statusErr := healthcheckrun.Fail(ctx, c, operatorNamespace, recordName); statusErr != nil {
-				logger.Error(statusErr, "failed to record spoke creation failure; pending record will be checked", "cluster", clusterName, "name", runName)
+				logger.Error(statusErr, "failed to record hub creation failure; pending record will be checked", "cluster", clusterName, "name", runName)
 			}
 		}
 		logger.Error(err, "failed to create AgenticRun", "cluster", clusterName, "name", runName)
@@ -169,19 +173,4 @@ func createAgenticRunForCluster(
 	}
 
 	logger.Info("created AgenticRun", "cluster", clusterName, "name", runName, "namespace", agenticrun.Namespace)
-}
-
-// buildSpokeClient creates a controller-runtime client from raw kubeconfig bytes.
-// The client supports unstructured objects, which is sufficient for AgenticRun creation.
-var buildSpokeClient = func(kubeconfigBytes []byte) (client.Client, error) {
-	cfg, err := clientcmd.RESTConfigFromKubeConfig(kubeconfigBytes)
-	if err != nil {
-		return nil, fmt.Errorf("building REST config: %w", err)
-	}
-	return newClientFromRESTConfig(cfg)
-}
-
-// newClientFromRESTConfig is a variable so tests can inject a fake client builder.
-var newClientFromRESTConfig = func(cfg *rest.Config) (client.Client, error) {
-	return client.New(cfg, client.Options{})
 }

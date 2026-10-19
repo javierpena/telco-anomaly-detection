@@ -7,10 +7,10 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 )
 
-// BuildObject constructs an unstructured AgenticRun object ready for creation on a spoke cluster.
+// BuildObject constructs an unstructured AgenticRun object ready for creation on the hub.
 // The caller supplies the name and labels; the namespace is always Namespace.
 // Fields absent or empty in cfg are omitted from the resulting spec.
-func BuildObject(name string, labels map[string]string, cfg *RunConfig) (*unstructured.Unstructured, error) {
+func BuildObject(name, clusterName string, labels map[string]string, cfg *RunConfig) (*unstructured.Unstructured, error) {
 	u := &unstructured.Unstructured{}
 	u.SetGroupVersionKind(schema.GroupVersionKind{
 		Group:   Group,
@@ -23,6 +23,12 @@ func BuildObject(name string, labels map[string]string, cfg *RunConfig) (*unstru
 
 	if err := unstructured.SetNestedField(u.Object, cfg.Request, "spec", "request"); err != nil {
 		return nil, fmt.Errorf("setting spec.request: %w", err)
+	}
+	if clusterName == "" {
+		return nil, fmt.Errorf("target cluster must not be empty")
+	}
+	if err := unstructured.SetNestedField(u.Object, clusterName, "spec", "targetCluster"); err != nil {
+		return nil, fmt.Errorf("setting spec.targetCluster: %w", err)
 	}
 
 	if err := unstructured.SetNestedField(u.Object, "default", "spec", "analysis", "agent"); err != nil {

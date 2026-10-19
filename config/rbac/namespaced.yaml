@@ -1,0 +1,98 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: telco-anomaly-lightspeed
+  namespace: openshift-lightspeed
+rules:
+  - apiGroups: [agentic.openshift.io]
+    resources: [agenticruns]
+    verbs: [create, get, list, watch]
+  - apiGroups: [agentic.openshift.io]
+    resources: [analysisresults]
+    verbs: [get, list, watch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: telco-anomaly-lightspeed
+  namespace: openshift-lightspeed
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: telco-anomaly-lightspeed
+subjects:
+  - kind: ServiceAccount
+    name: telco-anomaly-operator
+    namespace: telco-healthcheck-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: telco-anomaly-secrets
+  namespace: telco-healthcheck-system
+rules:
+  - apiGroups: [""]
+    resources: [secrets]
+    verbs: [create, delete, get, list, watch, update, patch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: telco-anomaly-secrets
+  namespace: telco-healthcheck-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: telco-anomaly-secrets
+subjects:
+  - kind: ServiceAccount
+    name: telco-anomaly-operator
+    namespace: telco-healthcheck-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: telco-anomaly-alertmanager-secret
+  namespace: open-cluster-management-observability
+rules:
+  - apiGroups: [""]
+    resources: [secrets]
+    verbs: [get, list, watch, update, patch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: telco-anomaly-alertmanager-secret
+  namespace: open-cluster-management-observability
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: telco-anomaly-alertmanager-secret
+subjects:
+  - kind: ServiceAccount
+    name: telco-anomaly-operator
+    namespace: telco-healthcheck-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: telco-anomaly-pull-secret
+  namespace: openshift-config
+rules:
+  - apiGroups: [""]
+    resources: [secrets]
+    verbs: [get, list, watch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: telco-anomaly-pull-secret
+  namespace: openshift-config
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: telco-anomaly-pull-secret
+subjects:
+  - kind: ServiceAccount
+    name: telco-anomaly-operator
+    namespace: telco-healthcheck-system

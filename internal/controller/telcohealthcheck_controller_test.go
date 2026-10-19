@@ -9,7 +9,6 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	clusterv1 "open-cluster-management.io/api/cluster/v1"
@@ -105,16 +104,10 @@ func TestRunPeriodicChecks_StaleReconcileCannotCreateDuplicate(t *testing.T) {
 	thc.Spec.PeriodicHealthChecks.MinJitter = &zero
 	thc.Spec.PeriodicHealthChecks.MaxJitter = &zero
 
-	spoke := fake.NewClientBuilder().WithScheme(runtime.NewScheme()).Build()
-	originalBuildSpokeClient := buildSpokeClient
-	defer func() { buildSpokeClient = originalBuildSpokeClient }()
-	buildSpokeClient = func([]byte) (client.Client, error) { return spoke, nil }
-
 	hub := fake.NewClientBuilder().WithScheme(scheme).
 		WithStatusSubresource(&ranv1alpha1.TelcoHealthcheck{}, &ranv1alpha1.TelcoHealthCheckRun{}).
 		WithObjects(
 			thc,
-			makeKubeconfigSecret("cluster-a"),
 			makeAgenticRunConfigMap("telco-anomaly-rds-compliance-config", operatorNamespace),
 		).Build()
 
@@ -147,8 +140,8 @@ func TestRunPeriodicChecks_StaleReconcileCannotCreateDuplicate(t *testing.T) {
 	runs.SetGroupVersionKind(schema.GroupVersionKind{
 		Group: agenticrun.Group, Version: agenticrun.Version, Kind: agenticrun.Kind + "List",
 	})
-	if err := spoke.List(context.Background(), runs); err != nil {
-		t.Fatalf("listing spoke AgenticRuns: %v", err)
+	if err := hub.List(context.Background(), runs, client.InNamespace(agenticrun.Namespace)); err != nil {
+		t.Fatalf("listing hub AgenticRuns: %v", err)
 	}
 	if len(runs.Items) != 1 {
 		t.Fatalf("expected exactly one AgenticRun for the interval, got %d", len(runs.Items))
@@ -193,13 +186,9 @@ func TestRunPeriodicChecks_LowLatencyConfigAndSchedule(t *testing.T) {
 	zero := &metav1.Duration{}
 	thc.Spec.PeriodicHealthChecks.LowLatencyCheck.MinJitter = zero
 	thc.Spec.PeriodicHealthChecks.LowLatencyCheck.MaxJitter = zero
-	spoke := fake.NewClientBuilder().WithScheme(runtime.NewScheme()).Build()
-	original := buildSpokeClient
-	defer func() { buildSpokeClient = original }()
-	buildSpokeClient = func([]byte) (client.Client, error) { return spoke, nil }
 	hub := fake.NewClientBuilder().WithScheme(newTestScheme(t)).
 		WithStatusSubresource(&ranv1alpha1.TelcoHealthcheck{}, &ranv1alpha1.TelcoHealthCheckRun{}).
-		WithObjects(thc, makeKubeconfigSecret("cluster-a")).Build()
+		WithObjects(thc).Build()
 	if err := reconcileSystemPeriodicConfigMaps(ctx, hub, operatorNamespace, thc.Spec.PeriodicHealthChecks); err != nil {
 		t.Fatal(err)
 	}
@@ -231,7 +220,7 @@ func TestRunPeriodicChecks_LowLatencyConfigAndSchedule(t *testing.T) {
 	}
 	runs := &unstructured.UnstructuredList{}
 	runs.SetGroupVersionKind(schema.GroupVersionKind{Group: agenticrun.Group, Version: agenticrun.Version, Kind: agenticrun.Kind + "List"})
-	if err := spoke.List(ctx, runs); err != nil || len(runs.Items) != 1 {
+	if err := hub.List(ctx, runs, client.InNamespace(agenticrun.Namespace)); err != nil || len(runs.Items) != 1 {
 		t.Fatalf("expected one low-latency AgenticRun, got %d: %v", len(runs.Items), err)
 	}
 	run := runs.Items[0].Object
@@ -267,13 +256,9 @@ func TestRunPeriodicChecks_BothChecksClaimIndependently(t *testing.T) {
 	zero := &metav1.Duration{}
 	thc.Spec.PeriodicHealthChecks.MinJitter = zero
 	thc.Spec.PeriodicHealthChecks.MaxJitter = zero
-	spoke := fake.NewClientBuilder().WithScheme(runtime.NewScheme()).Build()
-	original := buildSpokeClient
-	defer func() { buildSpokeClient = original }()
-	buildSpokeClient = func([]byte) (client.Client, error) { return spoke, nil }
 	hub := fake.NewClientBuilder().WithScheme(newTestScheme(t)).
 		WithStatusSubresource(&ranv1alpha1.TelcoHealthcheck{}, &ranv1alpha1.TelcoHealthCheckRun{}).
-		WithObjects(thc, makeKubeconfigSecret("cluster-a"),
+		WithObjects(thc,
 			makeAgenticRunConfigMap("telco-anomaly-rds-compliance-config", operatorNamespace)).Build()
 	if err := reconcileSystemPeriodicConfigMaps(ctx, hub, operatorNamespace, thc.Spec.PeriodicHealthChecks); err != nil {
 		t.Fatal(err)
@@ -290,7 +275,7 @@ func TestRunPeriodicChecks_BothChecksClaimIndependently(t *testing.T) {
 	}
 	runs := &unstructured.UnstructuredList{}
 	runs.SetGroupVersionKind(schema.GroupVersionKind{Group: agenticrun.Group, Version: agenticrun.Version, Kind: agenticrun.Kind + "List"})
-	if err := spoke.List(ctx, runs); err != nil || len(runs.Items) != 2 {
+	if err := hub.List(ctx, runs, client.InNamespace(agenticrun.Namespace)); err != nil || len(runs.Items) != 2 {
 		t.Fatalf("expected two AgenticRuns, got %d: %v", len(runs.Items), err)
 	}
 }
@@ -396,19 +381,10 @@ func TestReconcile_UpdatesMonitoredClusters(t *testing.T) {
 
 	thc := makeTelcoHealthcheck()
 	cluster := makeManagedCluster("cluster-a")
-	kubeconfigSecret := makeKubeconfigSecret("cluster-a")
 	alertManagerSecret := makeAlertManagerSecret(baseAlertmanagerYAML)
 
-	// Fake spoke client injected via buildSpokeClient override
-	spokeFake := fake.NewClientBuilder().WithScheme(scheme).Build()
-	origBuildSpokeClient := buildSpokeClient
-	defer func() { buildSpokeClient = origBuildSpokeClient }()
-	buildSpokeClient = func(_ []byte) (client.Client, error) {
-		return spokeFake, nil
-	}
-
 	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(
-		thc, cluster, kubeconfigSecret, alertManagerSecret,
+		thc, cluster, alertManagerSecret,
 	).WithStatusSubresource(thc).Build()
 
 	r := &TelcoHealthcheckReconciler{

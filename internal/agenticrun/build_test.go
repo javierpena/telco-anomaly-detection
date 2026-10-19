@@ -21,7 +21,7 @@ func TestBuildObject_FullConfig(t *testing.T) {
 		"telco-anomaly.io/healthcheck-ref": "my-healthcheck",
 	}
 
-	obj, err := BuildObject("test-run", labels, cfg)
+	obj, err := BuildObject("test-run", "cluster-a", labels, cfg)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -31,6 +31,9 @@ func TestBuildObject_FullConfig(t *testing.T) {
 	}
 	if obj.GetNamespace() != Namespace {
 		t.Errorf("expected namespace %q, got %q", Namespace, obj.GetNamespace())
+	}
+	if target, _, _ := unstructured.NestedString(obj.Object, "spec", "targetCluster"); target != "cluster-a" {
+		t.Errorf("spec.targetCluster = %q", target)
 	}
 	gvk := obj.GroupVersionKind()
 	if gvk.Group != Group || gvk.Version != Version || gvk.Kind != Kind {
@@ -72,7 +75,7 @@ func TestBuildObject_FullConfig(t *testing.T) {
 func TestBuildObject_EmptyToolsOmitted(t *testing.T) {
 	cfg := &RunConfig{Request: "minimal-request"}
 
-	obj, err := BuildObject("test-run", nil, cfg)
+	obj, err := BuildObject("test-run", "cluster-a", nil, cfg)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -103,7 +106,7 @@ func TestBuildObject_SkillsWithoutMCPServers(t *testing.T) {
 		Skills:  []SkillSpec{{Image: "quay.io/test:latest", Paths: []string{"/skills/test.yaml"}}},
 	}
 
-	obj, err := BuildObject("test-run", nil, cfg)
+	obj, err := BuildObject("test-run", "cluster-a", nil, cfg)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -124,7 +127,7 @@ func TestBuildObject_MCPServersWithoutSkills(t *testing.T) {
 		MCPServers: []MCPServerSpec{{Name: "kube-compare-mcp", URL: "http://mcp.example.com"}},
 	}
 
-	obj, err := BuildObject("test-run", nil, cfg)
+	obj, err := BuildObject("test-run", "cluster-a", nil, cfg)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -148,7 +151,7 @@ func TestBuildObject_EmptyPathsFiltered(t *testing.T) {
 		},
 	}
 
-	obj, err := BuildObject("test-run", nil, cfg)
+	obj, err := BuildObject("test-run", "cluster-a", nil, cfg)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

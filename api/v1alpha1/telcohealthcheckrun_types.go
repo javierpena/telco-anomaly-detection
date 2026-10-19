@@ -11,13 +11,13 @@ const (
 	TriggerTypePeriodicHealthCheck TriggerType = "periodicHealthCheck"
 )
 
-// AgenticRunStatus tracks spoke creation, then the latest AgenticRun condition
+// AgenticRunStatus tracks hub creation, then the latest AgenticRun condition
 // type and reason, and the AnalysisResult conclusion.
 type AgenticRunStatus struct {
 	// Type is taken from the latest AgenticRun condition.
 	// +optional
 	Type string `json:"type,omitempty"`
-	// Phase is Pending during spoke creation, Created or Failed once its outcome
+	// Phase is Pending during hub creation, Created or Failed once its outcome
 	// is known, then the reason of the latest AgenticRun condition.
 	// +optional
 	Phase string `json:"phase,omitempty"`
@@ -39,7 +39,7 @@ type AlertNotification struct {
 	Summary string       `json:"summary,omitempty"`
 }
 
-// TelcoHealthCheckRunStatus identifies the spoke run and records its observed result.
+// TelcoHealthCheckRunStatus identifies the hub run and target spoke and records its observed result.
 type TelcoHealthCheckRunStatus struct {
 	AgenticRunName string      `json:"agenticRunName"`
 	ClusterName    string      `json:"clusterName"`
@@ -74,7 +74,7 @@ type TelcoHealthCheckRunStatus struct {
 // +kubebuilder:printcolumn:name="Phase",type=string,JSONPath=`.status.agenticRunStatus.phase`
 // +kubebuilder:printcolumn:name="Action Required",type=string,JSONPath=`.status.agenticRunActionRequired`
 // +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
-// TelcoHealthCheckRun is a hub-side audit record of a spoke AgenticRun.
+// TelcoHealthCheckRun is a hub-side audit record of a targeted hub AgenticRun.
 type TelcoHealthCheckRun struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`

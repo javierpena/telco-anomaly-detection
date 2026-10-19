@@ -13,7 +13,9 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	clusterv1 "open-cluster-management.io/api/cluster/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/util/validation"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -23,13 +25,17 @@ import (
 
 	ranv1alpha1 "github.com/javierpena/telco-anomaly-detection/api/v1alpha1"
 	"github.com/javierpena/telco-anomaly-detection/internal/agenticrun"
+	"github.com/javierpena/telco-anomaly-detection/internal/healthcheckrun"
 )
 
 const (
 	alertRefreshInterval = time.Minute
 	alertLifetime        = 5 * time.Minute
-	consoleClaim         = "consoleurl.cluster.open-cluster-management.io"
+	hubConsoleNamespace  = "openshift-console"
+	hubConsoleRouteName  = "console"
 )
+
+// AgenticRun and AnalysisResult permissions are namespace-scoped in config/rbac/namespaced.yaml.
 
 // runAlertReconciler delivers the durable transition queue and renews firing
 // alerts. Its run watch also replays outstanding work after an operator restart.
@@ -43,6 +49,14 @@ type runAlertReconciler struct {
 func (r *runAlertReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&ranv1alpha1.TelcoHealthCheckRun{}).
+		Watches(hubRunObject(agenticrun.Kind), handler.EnqueueRequestsFromMapFunc(r.mapHubRunToRecords),
+			builder.WithPredicates(predicate.NewPredicateFuncs(func(obj client.Object) bool {
+				return obj.GetNamespace() == agenticrun.Namespace && obj.GetLabels()["app.kubernetes.io/managed-by"] == "telco-anomaly-detection"
+			}))).
+		Watches(hubRunObject("AnalysisResult"), handler.EnqueueRequestsFromMapFunc(r.mapHubResultToRecords),
+			builder.WithPredicates(predicate.NewPredicateFuncs(func(obj client.Object) bool {
+				return obj.GetNamespace() == agenticrun.Namespace
+			}))).
 		Watches(&ranv1alpha1.TelcoHealthcheck{}, handler.EnqueueRequestsFromMapFunc(r.mapHealthcheckToRuns),
 			builder.WithPredicates(predicate.GenerationChangedPredicate{})).
 		Watches(&corev1.Secret{}, handler.EnqueueRequestsFromMapFunc(r.mapAlertSecretToRuns),
@@ -50,6 +64,54 @@ func (r *runAlertReconciler) SetupWithManager(mgr ctrl.Manager) error {
 				return obj.GetNamespace() == r.namespace
 			}))).
 		Complete(r)
+}
+
+func (r *runAlertReconciler) mapHubRunToRecords(ctx context.Context, obj client.Object) []ctrl.Request {
+	if obj.GetNamespace() != agenticrun.Namespace || obj.GetLabels()["app.kubernetes.io/managed-by"] != "telco-anomaly-detection" {
+		return nil
+	}
+	run, ok := obj.(*unstructured.Unstructured)
+	if !ok {
+		return nil
+	}
+	cluster, _, err := unstructured.NestedString(run.Object, "spec", "targetCluster")
+	if err != nil || cluster == "" {
+		return nil
+	}
+	var records ranv1alpha1.TelcoHealthCheckRunList
+	if err := r.reader.List(ctx, &records, client.InNamespace(r.namespace),
+		client.MatchingLabels{healthcheckrun.RunKeyLabel: healthcheckrun.Key(cluster, run.GetName())}); err != nil {
+		log.FromContext(ctx).Error(err, "mapping hub AgenticRun to records", "run", run.GetName())
+		return nil
+	}
+	var requests []ctrl.Request
+	for i := range records.Items {
+		record := &records.Items[i]
+		if record.Annotations[healthcheckrun.HubOriginAnnotation] == "true" && record.Status.ClusterName == cluster &&
+			record.Status.AgenticRunName == run.GetName() {
+			requests = append(requests, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(record)})
+		}
+	}
+	return requests
+}
+
+func (r *runAlertReconciler) mapHubResultToRecords(ctx context.Context, obj client.Object) []ctrl.Request {
+	result, ok := obj.(*unstructured.Unstructured)
+	if !ok || result.GetNamespace() != agenticrun.Namespace {
+		return nil
+	}
+	name, _, err := unstructured.NestedString(result.Object, "spec", "agenticRunName")
+	if err != nil || name == "" {
+		return nil
+	}
+	run := hubRunObject(agenticrun.Kind)
+	if err := r.reader.Get(ctx, client.ObjectKey{Namespace: agenticrun.Namespace, Name: name}, run); err != nil {
+		if client.IgnoreNotFound(err) != nil {
+			log.FromContext(ctx).Error(err, "reading hub AgenticRun for AnalysisResult", "run", name)
+		}
+		return nil
+	}
+	return r.mapHubRunToRecords(ctx, run)
 }
 
 func (r *runAlertReconciler) mapAlertSecretToRuns(ctx context.Context, obj client.Object) []ctrl.Request {
@@ -85,12 +147,24 @@ func (r *runAlertReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	if req.Namespace != r.namespace {
 		return ctrl.Result{}, nil
 	}
-	owner := &ranv1alpha1.TelcoHealthcheck{}
-	if err := r.reader.Get(ctx, client.ObjectKey{Name: ranv1alpha1.TelcoHealthcheckCanonicalName}, owner); err != nil {
-		return ctrl.Result{}, client.IgnoreNotFound(err)
-	}
 	record := &ranv1alpha1.TelcoHealthCheckRun{}
 	if err := r.reader.Get(ctx, req.NamespacedName, record); err != nil {
+		return ctrl.Result{}, client.IgnoreNotFound(err)
+	}
+	syncErr := r.syncHubRunStatus(ctx, record)
+	if err := r.reader.Get(ctx, req.NamespacedName, record); err != nil {
+		return ctrl.Result{}, client.IgnoreNotFound(err)
+	}
+	if syncErr != nil {
+		// Deliver already queued transitions even when a result read fails;
+		// retry status sync once the durable delivery queue is empty.
+		if len(record.Status.AlertNotifications) == 0 {
+			return ctrl.Result{}, syncErr
+		}
+		log.FromContext(ctx).Error(syncErr, "retrying hub run status after queued alert delivery", "record", req.NamespacedName)
+	}
+	owner := &ranv1alpha1.TelcoHealthcheck{}
+	if err := r.reader.Get(ctx, client.ObjectKey{Name: ranv1alpha1.TelcoHealthcheckCanonicalName}, owner); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 	if owner.Spec.AlertManager == nil {
@@ -188,7 +262,7 @@ func (r *runAlertReconciler) send(ctx context.Context, config *ranv1alpha1.Alert
 		"cluster": record.Status.ClusterName, "summary": event.Summary,
 		"agentic_run": record.Status.AgenticRunName,
 	}
-	if link := r.agenticRunURL(ctx, record.Status.ClusterName, record.Status.AgenticRunName); link != "" {
+	if link := r.agenticRunURL(ctx, record.Status.AgenticRunName); link != "" {
 		annotations["url"] = link
 	}
 	endsAt := time.Now().Add(alertLifetime).UTC()
@@ -273,25 +347,20 @@ func (r *runAlertReconciler) authorize(ctx context.Context, req *http.Request, c
 	return nil
 }
 
-func (r *runAlertReconciler) agenticRunURL(ctx context.Context, clusterName, runName string) string {
-	cluster := &clusterv1.ManagedCluster{}
-	if err := r.reader.Get(ctx, client.ObjectKey{Name: clusterName}, cluster); err != nil {
+// agenticRunURL resolves the hub console, not the target spoke's console.
+// An unavailable or invalid Route leaves the optional URL annotation unset.
+func (r *runAlertReconciler) agenticRunURL(ctx context.Context, runName string) string {
+	route := &unstructured.Unstructured{}
+	route.SetGroupVersionKind(schema.GroupVersionKind{Group: "route.openshift.io", Version: "v1", Kind: "Route"})
+	if err := r.reader.Get(ctx, client.ObjectKey{Namespace: hubConsoleNamespace, Name: hubConsoleRouteName}, route); err != nil {
 		if !apierrors.IsNotFound(err) {
-			log.FromContext(ctx).Error(err, "reading spoke console claim", "cluster", clusterName)
+			log.FromContext(ctx).Error(err, "reading hub console Route")
 		}
 		return ""
 	}
-	for _, claim := range cluster.Status.ClusterClaims {
-		if claim.Name == consoleClaim {
-			base, err := url.Parse(claim.Value)
-			if err != nil || (base.Scheme != "https" && base.Scheme != "http") || base.Host == "" {
-				return ""
-			}
-			base.Path = strings.TrimRight(base.Path, "/") + "/lightspeed/runs/" + agenticrun.Namespace + "/" + runName
-			base.RawQuery = ""
-			base.Fragment = ""
-			return base.String()
-		}
+	host, found, err := unstructured.NestedString(route.Object, "spec", "host")
+	if err != nil || !found || len(validation.IsDNS1123Subdomain(host)) != 0 {
+		return ""
 	}
-	return ""
+	return (&url.URL{Scheme: "https", Host: host, Path: "/lightspeed/runs/" + agenticrun.Namespace + "/" + runName}).String()
 }

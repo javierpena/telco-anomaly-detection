@@ -18,9 +18,9 @@ import (
 
 const pendingRunGrace = 2 * time.Minute
 
-// recoverPendingRuns checks whether pending hub records have a corresponding
-// spoke run. A network error during Create is ambiguous, so never recreate a
-// spoke run. A stale record with no corresponding run is retained as Failed.
+// recoverPendingRuns checks whether hub-origin pending records have a corresponding
+// hub run. A network error during Create is ambiguous, so never recreate the run.
+// A stale record with no corresponding run is retained as Failed.
 func recoverPendingRuns(ctx context.Context, c client.Client, namespace string) (bool, error) {
 	var records ranv1alpha1.TelcoHealthCheckRunList
 	if err := c.List(ctx, &records, client.InNamespace(namespace)); err != nil {
@@ -29,7 +29,8 @@ func recoverPendingRuns(ctx context.Context, c client.Client, namespace string) 
 	pending := false
 	for i := range records.Items {
 		record := &records.Items[i]
-		if record.Annotations[healthcheckrun.PendingAnnotation] != "true" {
+		if record.Annotations[healthcheckrun.PendingAnnotation] != "true" ||
+			record.Annotations[healthcheckrun.HubOriginAnnotation] != "true" {
 			continue
 		}
 		pending = true
@@ -42,19 +43,9 @@ func recoverPendingRuns(ctx context.Context, c client.Client, namespace string) 
 			}
 			continue
 		}
-		kubeconfig, err := getClusterKubeconfig(ctx, c, record.Status.ClusterName)
-		if err != nil {
-			log.FromContext(ctx).Error(err, "pending run recovery: kubeconfig unavailable", "cluster", record.Status.ClusterName)
-			continue
-		}
-		spoke, err := buildSpokeClient(kubeconfig)
-		if err != nil {
-			log.FromContext(ctx).Error(err, "pending run recovery: spoke unavailable", "cluster", record.Status.ClusterName)
-			continue
-		}
 		run := &unstructured.Unstructured{}
 		run.SetGroupVersionKind(schema.GroupVersionKind{Group: agenticrun.Group, Version: agenticrun.Version, Kind: agenticrun.Kind})
-		err = spoke.Get(ctx, client.ObjectKey{Namespace: agenticrun.Namespace, Name: record.Status.AgenticRunName}, run)
+		err := c.Get(ctx, client.ObjectKey{Namespace: agenticrun.Namespace, Name: record.Status.AgenticRunName}, run)
 		if apierrors.IsNotFound(err) {
 			if err := healthcheckrun.Fail(ctx, c, namespace, record.Name); err != nil {
 				log.FromContext(ctx).Error(err, "pending run recovery: marking creation failed", "name", record.Name)
@@ -62,7 +53,14 @@ func recoverPendingRuns(ctx context.Context, c client.Client, namespace string) 
 			continue
 		}
 		if err != nil {
-			log.FromContext(ctx).Error(err, "pending run recovery: checking spoke run", "name", record.Name)
+			log.FromContext(ctx).Error(err, "pending run recovery: checking hub run", "name", record.Name)
+			continue
+		}
+		cluster, _, err := unstructured.NestedString(run.Object, "spec", "targetCluster")
+		if err != nil || cluster != record.Status.ClusterName ||
+			record.Labels[healthcheckrun.RunKeyLabel] != healthcheckrun.Key(cluster, run.GetName()) ||
+			run.GetLabels()["app.kubernetes.io/managed-by"] != "telco-anomaly-detection" {
+			log.FromContext(ctx).Info("pending run recovery: hub run identity mismatch", "name", record.Name)
 			continue
 		}
 		if err := healthcheckrun.Confirm(ctx, c, namespace, record.Name); err != nil {

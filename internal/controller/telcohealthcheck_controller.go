@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"net/http"
-	"strings"
 	"time"
 
 	uberzap "go.uber.org/zap"
@@ -32,7 +31,6 @@ const telcoHealthcheckFinalizer = "ran.openshift.io/telcohealthcheck-finalizer"
 // +kubebuilder:rbac:groups=ran.openshift.io,resources=telcohealthchecks/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=ran.openshift.io,resources=telcohealthchecks/finalizers,verbs=update
 // +kubebuilder:rbac:groups=cluster.open-cluster-management.io,resources=managedclusters,verbs=get;list;watch
-// +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch;update;patch
 // +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=coordination.k8s.io,resources=leases,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
@@ -51,8 +49,7 @@ type TelcoHealthcheckReconciler struct {
 	AlertReceiverSvcURL string
 	// LogLevel, when non-nil, is updated on each reconcile to reflect the most
 	// verbose logLevel across all TelcoHealthcheck CRs.
-	LogLevel     *uberzap.AtomicLevel
-	SpokeWatches *SpokeWatchManager
+	LogLevel *uberzap.AtomicLevel
 	// ShutdownContext cancels delayed periodic runs when the manager stops.
 	ShutdownContext context.Context
 }
@@ -70,17 +67,11 @@ func (r *TelcoHealthcheckReconciler) Reconcile(ctx context.Context, req ctrl.Req
 
 	thc := &ranv1alpha1.TelcoHealthcheck{}
 	if err := r.Get(ctx, req.NamespacedName, thc); err != nil {
-		if r.SpokeWatches != nil {
-			r.SpokeWatches.Stop()
-		}
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
 	// Deletion path: DeletionTimestamp is set, run cleanup then remove finalizer.
 	if !thc.DeletionTimestamp.IsZero() {
-		if r.SpokeWatches != nil {
-			r.SpokeWatches.Stop()
-		}
 		return r.handleDeletion(ctx, thc)
 	}
 
@@ -111,9 +102,6 @@ func (r *TelcoHealthcheckReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		return ctrl.Result{}, fmt.Errorf("resolving monitored clusters: %w", err)
 	}
 	thc.Status.MonitoredClusters = monitoredClusters
-	if r.SpokeWatches != nil {
-		r.SpokeWatches.Sync(ctx, monitoredClusters)
-	}
 	pendingRuns, err := recoverPendingRuns(ctx, r.Client, r.OperatorNamespace)
 	if err != nil {
 		return ctrl.Result{}, err
@@ -170,11 +158,6 @@ func (r *TelcoHealthcheckReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	}
 	if pendingRuns && (requeueAfter == 0 || requeueAfter > time.Minute) {
 		requeueAfter = time.Minute
-	}
-	// The manager runnable and controller may start concurrently. If the
-	// runnable has not received its lifecycle context yet, retry the sync.
-	if r.SpokeWatches != nil && !r.SpokeWatches.Ready() && (requeueAfter == 0 || requeueAfter > 5*time.Second) {
-		requeueAfter = 5 * time.Second
 	}
 
 	// Persist status changes not already written as the periodic schedule claim.
@@ -411,10 +394,6 @@ func (r *TelcoHealthcheckReconciler) alertReceiverURL() string {
 // SetupWithManager registers the controller with the manager and sets up watches on
 // TelcoHealthcheck resources, ManagedCluster resources, and user-alert ConfigMaps.
 func (r *TelcoHealthcheckReconciler) SetupWithManager(mgr ctrl.Manager) error {
-	r.SpokeWatches = newSpokeWatchManager(mgr.GetClient(), mgr.GetAPIReader(), r.OperatorNamespace)
-	if err := mgr.Add(r.SpokeWatches); err != nil {
-		return err
-	}
 	if err := (&runAlertReconciler{
 		Client: mgr.GetClient(), reader: mgr.GetAPIReader(), namespace: r.OperatorNamespace,
 		http: &http.Client{Timeout: 10 * time.Second},
@@ -431,14 +410,6 @@ func (r *TelcoHealthcheckReconciler) SetupWithManager(mgr ctrl.Manager) error {
 			&corev1.ConfigMap{},
 			handler.EnqueueRequestsFromMapFunc(r.mapUserAlertCMToTHC),
 			builder.WithPredicates(predicate.NewPredicateFuncs(isUserAlertConfigMap)),
-		).
-		Watches(
-			&corev1.Secret{},
-			handler.EnqueueRequestsFromMapFunc(r.mapManagedClusterToTelcoHealthchecks),
-			builder.WithPredicates(predicate.NewPredicateFuncs(func(obj client.Object) bool {
-				return strings.TrimSuffix(obj.GetName(), "-admin-kubeconfig") == obj.GetNamespace() &&
-					strings.HasSuffix(obj.GetName(), "-admin-kubeconfig")
-			})),
 		).
 		Watches(
 			&ranv1alpha1.TelcoHealthCheckRun{},

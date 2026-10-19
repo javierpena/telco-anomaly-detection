@@ -24,7 +24,7 @@ System-alert ConfigMaps (embedded assets) ──► reconcileAlertRules ──�
                 AgenticRun config (from the same CM)
                         │
                         ▼
-                AgenticRun created on spoke cluster
+                 AgenticRun created on hub with spec.targetCluster set to spoke
 ```
 
 ---
@@ -193,4 +193,4 @@ After creating or updating a user-alert ConfigMap:
 2. Confirm the `thanos-ruler-custom-rules` ConfigMap in `open-cluster-management-observability` contains the new rule group.
 3. Confirm the `observability-metrics-custom-allowlist` ConfigMap lists any new metrics.
 4. Fire the alert and verify the alert receiver logs `matched alert – creating AgenticRun`.
-5. Check that an `AgenticRun` appears in `openshift-lightspeed` on the target spoke cluster.
+5. Check that an `AgenticRun` appears in `openshift-lightspeed` on the hub, with `spec.targetCluster` set to the intended spoke.

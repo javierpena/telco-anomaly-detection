@@ -4,7 +4,6 @@ package alertreceiver
 
 import (
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -17,8 +16,6 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
-	"k8s.io/client-go/rest"
-	"k8s.io/client-go/tools/clientcmd"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -65,11 +62,8 @@ type Alert struct {
 // It validates each alert against the list of monitored clusters and defined alert names,
 // then creates an AgenticRun on the matching managed cluster.
 type Handler struct {
-	// HubClient is a client for the ACM hub cluster (reads TelcoHealthcheck, Secrets).
+	// HubClient reads hub configuration and creates hub AgenticRuns and records.
 	HubClient client.Client
-	// NewSpokeClient builds a client for a spoke cluster from kubeconfig bytes.
-	// Overridable for testing.
-	NewSpokeClient func([]byte) (client.Client, error)
 	// LogLevel, when non-nil, is updated on each webhook call to reflect the most
 	// verbose logLevel across all TelcoHealthcheck CRs.
 	LogLevel *uberzap.AtomicLevel
@@ -78,23 +72,9 @@ type Handler struct {
 // NewHandler creates a Handler with default dependencies.
 func NewHandler(hubClient client.Client, logLevel *uberzap.AtomicLevel) *Handler {
 	return &Handler{
-		HubClient:      hubClient,
-		NewSpokeClient: defaultNewSpokeClient,
-		LogLevel:       logLevel,
+		HubClient: hubClient,
+		LogLevel:  logLevel,
 	}
-}
-
-func defaultNewSpokeClient(kubeconfigBytes []byte) (client.Client, error) {
-	cfg, err := clientcmd.RESTConfigFromKubeConfig(kubeconfigBytes)
-	if err != nil {
-		return nil, fmt.Errorf("building REST config: %w", err)
-	}
-	return newClientFromConfig(cfg)
-}
-
-// newClientFromConfig is overridable for testing.
-var newClientFromConfig = func(cfg *rest.Config) (client.Client, error) {
-	return client.New(cfg, client.Options{})
 }
 
 // HandleWebhook processes a POST /webhook request from AlertManager.
@@ -145,7 +125,7 @@ func (h *Handler) processAlerts(ctx context.Context, alerts []Alert) error {
 
 	logger := log.FromContext(ctx)
 
-	monitoredClusters, clusterKubeconfigs, err := h.getMonitoredClusters(ctx)
+	monitoredClusters, err := h.getMonitoredClusters(ctx)
 	if err != nil {
 		return fmt.Errorf("fetching monitored clusters: %w", err)
 	}
@@ -189,8 +169,7 @@ func (h *Handler) processAlerts(ctx context.Context, alerts []Alert) error {
 			"cluster", clusterName,
 			"alertname", alertName)
 
-		kubeconfig := clusterKubeconfigs[clusterName]
-		if err := h.createAgenticRunOnCluster(ctx, kubeconfig, clusterName, alertName, alert.Annotations); err != nil {
+		if err := h.createAgenticRunOnCluster(ctx, clusterName, alertName, alert.Annotations); err != nil {
 			logger.Error(err, "failed to create AgenticRun for alert",
 				"cluster", clusterName, "alertname", alertName)
 			// Continue processing other alerts.
@@ -200,13 +179,13 @@ func (h *Handler) processAlerts(ctx context.Context, alerts []Alert) error {
 }
 
 // getMonitoredClusters reads the singleton TelcoHealthcheck CR and returns the set of monitored
-// cluster names along with their kubeconfig bytes.
-func (h *Handler) getMonitoredClusters(ctx context.Context) (map[string]bool, map[string][]byte, error) {
+// cluster names.
+func (h *Handler) getMonitoredClusters(ctx context.Context) (map[string]bool, error) {
 	thc := &ranv1alpha1.TelcoHealthcheck{}
 	if err := h.HubClient.Get(ctx, client.ObjectKey{
 		Name: ranv1alpha1.TelcoHealthcheckCanonicalName,
 	}, thc); err != nil {
-		return nil, nil, fmt.Errorf("getting TelcoHealthcheck: %w", err)
+		return nil, fmt.Errorf("getting TelcoHealthcheck: %w", err)
 	}
 
 	if h.LogLevel != nil {
@@ -222,17 +201,7 @@ func (h *Handler) getMonitoredClusters(ctx context.Context) (map[string]bool, ma
 		clusterSet[name] = true
 	}
 
-	kubeconfigs := make(map[string][]byte, len(clusterSet))
-	for clusterName := range clusterSet {
-		kubeconfig, err := fetchKubeconfig(ctx, h.HubClient, clusterName)
-		if err != nil {
-			log.FromContext(ctx).Error(err, "failed to fetch kubeconfig", "cluster", clusterName)
-			continue
-		}
-		kubeconfigs[clusterName] = kubeconfig
-	}
-
-	return clusterSet, kubeconfigs, nil
+	return clusterSet, nil
 }
 
 // getDefinedAlertNames reads the thanos-ruler-custom-rules ConfigMap and extracts
@@ -293,36 +262,6 @@ func extractAlertName(line string) string {
 	return ""
 }
 
-// fetchKubeconfig retrieves the admin kubeconfig bytes for clusterName.
-func fetchKubeconfig(ctx context.Context, c client.Client, clusterName string) ([]byte, error) {
-	secret := &unstructured.Unstructured{}
-	secret.SetGroupVersionKind(schema.GroupVersionKind{Group: "", Version: "v1", Kind: "Secret"})
-	if err := c.Get(ctx, client.ObjectKey{
-		Name:      clusterName + "-admin-kubeconfig",
-		Namespace: clusterName,
-	}, secret); err != nil {
-		return nil, fmt.Errorf("getting kubeconfig secret for cluster %s: %w", clusterName, err)
-	}
-
-	data, _, _ := unstructured.NestedMap(secret.Object, "data")
-	raw, ok := data["kubeconfig"]
-	if !ok {
-		return nil, fmt.Errorf("'kubeconfig' key missing in secret for cluster %s", clusterName)
-	}
-	switch v := raw.(type) {
-	case []byte:
-		return v, nil
-	case string:
-		decoded, err := base64.StdEncoding.DecodeString(v)
-		if err != nil {
-			return nil, fmt.Errorf("decoding kubeconfig for cluster %s: %w", clusterName, err)
-		}
-		return decoded, nil
-	default:
-		return nil, fmt.Errorf("unexpected kubeconfig type %T for cluster %s", raw, clusterName)
-	}
-}
-
 // resolveAlertConfigMap returns the ConfigMap name that holds AgenticRun config for alertName.
 // It lists all managed ConfigMaps in namespace and matches by alertName data field,
 // accepting both system-alert (ran.openshift.io/system-managed-alert) and user-alert
@@ -346,8 +285,8 @@ func resolveAlertConfigMap(ctx context.Context, c client.Client, alertName, name
 }
 
 // createAgenticRunOnCluster creates an AgenticRun in the openshift-lightspeed namespace
-// on the target cluster identified by the provided kubeconfig.
-func (h *Handler) createAgenticRunOnCluster(ctx context.Context, kubeconfig []byte, clusterName, alertName string, annotations map[string]string) error {
+// on the hub targeting the named managed cluster.
+func (h *Handler) createAgenticRunOnCluster(ctx context.Context, clusterName, alertName string, annotations map[string]string) error {
 	logger := log.FromContext(ctx)
 
 	configMapName, err := resolveAlertConfigMap(ctx, h.HubClient, alertName, operatorNamespace)
@@ -374,11 +313,6 @@ func (h *Handler) createAgenticRunOnCluster(ctx context.Context, kubeconfig []by
 	}
 	cfg = agenticrun.ExpandVariables(cfg, vars)
 
-	spokeClient, err := h.NewSpokeClient(kubeconfig)
-	if err != nil {
-		return fmt.Errorf("building spoke client for cluster %s: %w", clusterName, err)
-	}
-
 	runName := fmt.Sprintf("telco-alert-%s-%d", strings.ToLower(alertName), time.Now().UnixNano())
 
 	labels := map[string]string{
@@ -387,23 +321,23 @@ func (h *Handler) createAgenticRunOnCluster(ctx context.Context, kubeconfig []by
 		"telco-anomaly.io/trigger-alert":   alertName,
 		"telco-anomaly.io/trigger-cluster": clusterName,
 	}
-	u, err := agenticrun.BuildObject(runName, labels, cfg)
+	u, err := agenticrun.BuildObject(runName, clusterName, labels, cfg)
 	if err != nil {
 		return fmt.Errorf("building AgenticRun object: %w", err)
 	}
 	owner := &ranv1alpha1.TelcoHealthcheck{}
 	if err := h.HubClient.Get(ctx, client.ObjectKey{Name: ranv1alpha1.TelcoHealthcheckCanonicalName}, owner); err != nil {
-		return fmt.Errorf("fetching singleton for audit record before spoke creation: %w", err)
+		return fmt.Errorf("fetching singleton for audit record before hub creation: %w", err)
 	}
 	if _, err := healthcheckrun.Begin(ctx, h.HubClient, operatorNamespace, runName, runName,
 		clusterName, ranv1alpha1.TriggerTypeAlert, alertName, owner); err != nil {
 		return err
 	}
 
-	if err := spokeClient.Create(ctx, u); err != nil {
+	if err := h.HubClient.Create(ctx, u); err != nil {
 		if healthcheckrun.DefinitiveCreateError(err) {
 			if statusErr := healthcheckrun.Fail(ctx, h.HubClient, operatorNamespace, runName); statusErr != nil {
-				logger.Error(statusErr, "failed to record spoke creation failure; pending record will be checked", "cluster", clusterName, "name", runName)
+				logger.Error(statusErr, "failed to record hub creation failure; pending record will be checked", "cluster", clusterName, "name", runName)
 			}
 		}
 		return fmt.Errorf("creating AgenticRun %s on cluster %s (hub record retained): %w", runName, clusterName, err)

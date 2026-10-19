@@ -14,7 +14,7 @@ const (
 	Kind = "AgenticRun"
 	// APIVersion is the fully qualified API version string.
 	APIVersion = Group + "/" + Version
-	// Namespace is the namespace where AgenticRun resources are always created on spoke clusters.
+	// Namespace is the namespace where AgenticRun resources are created on the hub.
 	Namespace = "openshift-lightspeed"
 )
 
@@ -66,6 +66,8 @@ type AgenticRunSpec struct {
 	// Request is the user's original prompt or alert description (1–32768 chars).
 	// Immutable after creation.
 	Request string `json:"request"`
+	// TargetCluster identifies the managed cluster investigated by this hub run.
+	TargetCluster string `json:"targetCluster,omitempty"`
 	// Analysis is required by the CRD. At minimum, agent defaults to "default".
 	Analysis *AnalysisSpec `json:"analysis"`
 	// Tools provides the shared toolset available across all analysis steps.

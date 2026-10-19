@@ -44,18 +44,6 @@ func makeTHCWithMonitoredClusters(clusters []string) *ranv1alpha1.TelcoHealthche
 	return thc
 }
 
-func makeKubeconfigSecretUnstructured(clusterName string) *corev1.Secret {
-	return &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      clusterName + "-admin-kubeconfig",
-			Namespace: clusterName,
-		},
-		Data: map[string][]byte{
-			"kubeconfig": []byte("fake-kubeconfig"),
-		},
-	}
-}
-
 func makeAlertNamesConfigMap(alertNames []string) *unstructured.Unstructured {
 	rules := "groups:\n"
 	for _, name := range alertNames {
@@ -156,23 +144,15 @@ func TestProcessAlerts_MatchCreatesAgenticRun(t *testing.T) {
 	const alertName = "TelcoHealthCheckHostNetwork"
 
 	thc := makeTHCWithMonitoredClusters([]string{"cluster-a"})
-	kubeSecret := makeKubeconfigSecretUnstructured("cluster-a")
 	alertCM := makeAlertNamesConfigMap([]string{alertName})
 	configCM := makeSystemAlertConfigMap("telco-anomaly-host-network-config", operatorNamespace, alertName, "check host network")
 
 	hubClient := fake.NewClientBuilder().WithScheme(scheme).
 		WithStatusSubresource(thc, &ranv1alpha1.TelcoHealthCheckRun{}).
-		WithObjects(thc, kubeSecret, alertCM, configCM).
+		WithObjects(thc, alertCM, configCM).
 		Build()
 
-	spokeFake := fake.NewClientBuilder().WithScheme(runtime.NewScheme()).Build()
-
-	h := &Handler{
-		HubClient: hubClient,
-		NewSpokeClient: func(_ []byte) (client.Client, error) {
-			return spokeFake, nil
-		},
-	}
+	h := &Handler{HubClient: hubClient}
 
 	alerts := []Alert{
 		{
@@ -191,11 +171,17 @@ func TestProcessAlerts_MatchCreatesAgenticRun(t *testing.T) {
 		Version: agenticrun.Version,
 		Kind:    agenticrun.Kind + "List",
 	})
-	if err := spokeFake.List(context.Background(), runList); err != nil {
+	if err := hubClient.List(context.Background(), runList, client.InNamespace(agenticrun.Namespace)); err != nil {
 		t.Fatalf("listing AgenticRuns: %v", err)
 	}
 	if len(runList.Items) == 0 {
 		t.Error("expected at least one AgenticRun to be created")
+	}
+	if len(runList.Items) == 1 {
+		cluster, _, _ := unstructured.NestedString(runList.Items[0].Object, "spec", "targetCluster")
+		if cluster != "cluster-a" {
+			t.Errorf("target cluster = %q", cluster)
+		}
 	}
 	var records ranv1alpha1.TelcoHealthCheckRunList
 	if err := hubClient.List(context.Background(), &records, client.InNamespace(operatorNamespace)); err != nil {
@@ -214,16 +200,19 @@ func TestProcessAlerts_MatchCreatesAgenticRun(t *testing.T) {
 	}
 }
 
-type failingSpokeCreateClient struct {
+type failingHubCreateClient struct {
 	client.Client
 	err error
 }
 
-func (c failingSpokeCreateClient) Create(context.Context, client.Object, ...client.CreateOption) error {
-	return c.err
+func (c failingHubCreateClient) Create(ctx context.Context, obj client.Object, opts ...client.CreateOption) error {
+	if obj.GetObjectKind().GroupVersionKind().Kind == agenticrun.Kind {
+		return c.err
+	}
+	return c.Client.Create(ctx, obj, opts...)
 }
 
-func TestProcessAlerts_RecordsSpokeCreateFailure(t *testing.T) {
+func TestProcessAlerts_RecordsHubCreateFailure(t *testing.T) {
 	for _, tt := range []struct {
 		name, phase string
 		err         error
@@ -236,12 +225,9 @@ func TestProcessAlerts_RecordsSpokeCreateFailure(t *testing.T) {
 			thc := makeTHCWithMonitoredClusters([]string{"cluster-a"})
 			hub := fake.NewClientBuilder().WithScheme(newHandlerScheme(t)).
 				WithStatusSubresource(thc, &ranv1alpha1.TelcoHealthCheckRun{}).
-				WithObjects(thc, makeKubeconfigSecretUnstructured("cluster-a"),
-					makeAlertNamesConfigMap([]string{alertName}),
+				WithObjects(thc, makeAlertNamesConfigMap([]string{alertName}),
 					makeSystemAlertConfigMap("telco-anomaly-host-network-config", operatorNamespace, alertName, "check host network")).Build()
-			h := &Handler{HubClient: hub, NewSpokeClient: func([]byte) (client.Client, error) {
-				return failingSpokeCreateClient{Client: fake.NewClientBuilder().WithScheme(runtime.NewScheme()).Build(), err: tt.err}, nil
-			}}
+			h := &Handler{HubClient: failingHubCreateClient{Client: hub, err: tt.err}}
 			if err := h.processAlerts(context.Background(), []Alert{{
 				Status: "firing", Labels: map[string]string{"cluster": "cluster-a", "alertname": alertName},
 			}}); err != nil {
@@ -264,20 +250,14 @@ func TestProcessAlerts_NonFiringAlertSkipped(t *testing.T) {
 	const alertName = "TelcoHealthCheckHostNetwork"
 
 	thc := makeTHCWithMonitoredClusters([]string{"cluster-a"})
-	kubeSecret := makeKubeconfigSecretUnstructured("cluster-a")
 	alertCM := makeAlertNamesConfigMap([]string{alertName})
 	configCM := makeAgenticRunConfigMapUnstructured("telco-anomaly-host-network-config", operatorNamespace)
 
 	hubClient := fake.NewClientBuilder().WithScheme(scheme).
 		WithStatusSubresource(thc, &ranv1alpha1.TelcoHealthCheckRun{}).
-		WithObjects(thc, kubeSecret, alertCM, configCM).
+		WithObjects(thc, alertCM, configCM).
 		Build()
-
-	spokeFake := fake.NewClientBuilder().WithScheme(runtime.NewScheme()).Build()
-	h := &Handler{
-		HubClient:      hubClient,
-		NewSpokeClient: func(_ []byte) (client.Client, error) { return spokeFake, nil },
-	}
+	h := &Handler{HubClient: hubClient}
 
 	alerts := []Alert{
 		{
@@ -295,7 +275,7 @@ func TestProcessAlerts_NonFiringAlertSkipped(t *testing.T) {
 		Version: agenticrun.Version,
 		Kind:    agenticrun.Kind + "List",
 	})
-	_ = spokeFake.List(context.Background(), runList)
+	_ = hubClient.List(context.Background(), runList, client.InNamespace(agenticrun.Namespace))
 	if len(runList.Items) != 0 {
 		t.Errorf("expected no AgenticRuns for resolved alert, got %d", len(runList.Items))
 	}
@@ -311,11 +291,7 @@ func TestProcessAlerts_UnmonitoredClusterSkipped(t *testing.T) {
 		WithObjects(thc, alertCM).
 		Build()
 
-	spokeFake := fake.NewClientBuilder().WithScheme(runtime.NewScheme()).Build()
-	h := &Handler{
-		HubClient:      hubClient,
-		NewSpokeClient: func(_ []byte) (client.Client, error) { return spokeFake, nil },
-	}
+	h := &Handler{HubClient: hubClient}
 
 	alerts := []Alert{
 		{Labels: map[string]string{"cluster": "unknown-cluster", "alertname": "TargetAlert"}},
@@ -330,7 +306,7 @@ func TestProcessAlerts_UnmonitoredClusterSkipped(t *testing.T) {
 		Version: agenticrun.Version,
 		Kind:    agenticrun.Kind + "List",
 	})
-	_ = spokeFake.List(context.Background(), runList)
+	_ = hubClient.List(context.Background(), runList, client.InNamespace(agenticrun.Namespace))
 	if len(runList.Items) != 0 {
 		t.Errorf("expected no AgenticRuns created for unmonitored cluster, got %d", len(runList.Items))
 	}
@@ -340,18 +316,12 @@ func TestProcessAlerts_UndefinedAlertSkipped(t *testing.T) {
 	scheme := newHandlerScheme(t)
 
 	thc := makeTHCWithMonitoredClusters([]string{"cluster-a"})
-	kubeSecret := makeKubeconfigSecretUnstructured("cluster-a")
 	alertCM := makeAlertNamesConfigMap([]string{"DefinedAlert"})
 	hubClient := fake.NewClientBuilder().WithScheme(scheme).
 		WithStatusSubresource(thc, &ranv1alpha1.TelcoHealthCheckRun{}).
-		WithObjects(thc, kubeSecret, alertCM).
+		WithObjects(thc, alertCM).
 		Build()
-
-	spokeFake := fake.NewClientBuilder().WithScheme(runtime.NewScheme()).Build()
-	h := &Handler{
-		HubClient:      hubClient,
-		NewSpokeClient: func(_ []byte) (client.Client, error) { return spokeFake, nil },
-	}
+	h := &Handler{HubClient: hubClient}
 
 	alerts := []Alert{
 		{Labels: map[string]string{"cluster": "cluster-a", "alertname": "UndefinedAlert"}},
@@ -366,7 +336,7 @@ func TestProcessAlerts_UndefinedAlertSkipped(t *testing.T) {
 		Version: agenticrun.Version,
 		Kind:    agenticrun.Kind + "List",
 	})
-	_ = spokeFake.List(context.Background(), runList)
+	_ = hubClient.List(context.Background(), runList, client.InNamespace(agenticrun.Namespace))
 	if len(runList.Items) != 0 {
 		t.Errorf("expected no AgenticRuns created for undefined alert, got %d", len(runList.Items))
 	}
@@ -378,7 +348,6 @@ func TestProcessAlerts_NodeNameExpandedInRequest(t *testing.T) {
 	const alertName = "TelcoHealthCheckOVSProcessCPU"
 
 	thc := makeTHCWithMonitoredClusters([]string{"cluster-a"})
-	kubeSecret := makeKubeconfigSecretUnstructured("cluster-a")
 	alertCM := makeAlertNamesConfigMap([]string{alertName})
 	configCM := makeSystemAlertConfigMap(
 		"telco-anomaly-ovs-process-cpu-config", operatorNamespace, alertName,
@@ -387,17 +356,11 @@ func TestProcessAlerts_NodeNameExpandedInRequest(t *testing.T) {
 
 	hubClient := fake.NewClientBuilder().WithScheme(scheme).
 		WithStatusSubresource(thc, &ranv1alpha1.TelcoHealthCheckRun{}).
-		WithObjects(thc, kubeSecret, alertCM, configCM).
+		WithObjects(thc, alertCM, configCM).
 		Build()
 
 	var capturedRequest string
-	spokeFake := fake.NewClientBuilder().WithScheme(runtime.NewScheme()).Build()
-	h := &Handler{
-		HubClient: hubClient,
-		NewSpokeClient: func(_ []byte) (client.Client, error) {
-			return spokeFake, nil
-		},
-	}
+	h := &Handler{HubClient: hubClient}
 
 	alerts := []Alert{
 		{
@@ -417,7 +380,7 @@ func TestProcessAlerts_NodeNameExpandedInRequest(t *testing.T) {
 		Version: agenticrun.Version,
 		Kind:    agenticrun.Kind + "List",
 	})
-	if err := spokeFake.List(context.Background(), runList); err != nil {
+	if err := hubClient.List(context.Background(), runList, client.InNamespace(agenticrun.Namespace)); err != nil {
 		t.Fatalf("listing AgenticRuns: %v", err)
 	}
 	if len(runList.Items) == 0 {

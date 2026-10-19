@@ -150,11 +150,9 @@ func TestCleanupSystemAlertConfigMaps(t *testing.T) {
 		"telco-anomaly-host-reserved-cpu-config",
 		"telco-anomaly-ovs-process-cpu-config",
 	}
-	var objs []interface{}
 	for i, cm := range existing {
 		cm.Name = names[i]
 		cm.Namespace = "test-ns"
-		objs = append(objs, cm)
 	}
 
 	builder := fake.NewClientBuilder().WithScheme(scheme)

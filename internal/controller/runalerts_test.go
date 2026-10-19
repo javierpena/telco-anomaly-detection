@@ -13,7 +13,8 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	clusterv1 "open-cluster-management.io/api/cluster/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -88,8 +89,7 @@ func TestRunAlertDeliveryRetryResolutionAndRenewal(t *testing.T) {
 	defer server.Close()
 	owner := &ranv1alpha1.TelcoHealthcheck{ObjectMeta: metav1.ObjectMeta{Name: ranv1alpha1.TelcoHealthcheckCanonicalName}}
 	owner.Spec.AlertManager = &ranv1alpha1.AlertManagerSpec{URL: server.URL} // omitted authType defaults to none
-	cluster := makeManagedCluster("cluster-a")
-	cluster.Status.ClusterClaims = []clusterv1.ManagedClusterClaim{{Name: consoleClaim, Value: "https://console.example.test/"}}
+	consoleRoute := hubConsoleRoute("console.hub.example.test")
 	start := metav1.NewTime(time.Now().UTC().Truncate(time.Second))
 	record := &ranv1alpha1.TelcoHealthCheckRun{
 		ObjectMeta: metav1.ObjectMeta{Name: "record", Namespace: operatorNamespace},
@@ -100,8 +100,8 @@ func TestRunAlertDeliveryRetryResolutionAndRenewal(t *testing.T) {
 			AlertNotifications: []ranv1alpha1.AlertNotification{{Firing: true, StartsAt: start, Summary: "inspect pod"}},
 		},
 	}
-	hub := fake.NewClientBuilder().WithScheme(newTestScheme(t)).WithStatusSubresource(record, owner, cluster).
-		WithObjects(owner, cluster, record).Build()
+	hub := fake.NewClientBuilder().WithScheme(newTestScheme(t)).WithStatusSubresource(record, owner).
+		WithObjects(owner, record, consoleRoute).Build()
 	makeReconciler := func() *runAlertReconciler {
 		return &runAlertReconciler{Client: hub, reader: hub, namespace: operatorNamespace, http: server.Client()}
 	}
@@ -140,7 +140,7 @@ func TestRunAlertDeliveryRetryResolutionAndRenewal(t *testing.T) {
 		first.Labels["cluster"] != "cluster-a" || first.Labels["agentic_run"] != "run-a" ||
 		first.Annotations["cluster"] != "cluster-a" || first.Annotations["summary"] != "inspect pod" ||
 		first.Annotations["agentic_run"] != "run-a" ||
-		first.Annotations["url"] != "https://console.example.test/lightspeed/runs/openshift-lightspeed/run-a" ||
+		first.Annotations["url"] != "https://console.hub.example.test/lightspeed/runs/openshift-lightspeed/run-a" ||
 		!first.StartsAt.Equal(start.Time) || time.Until(first.EndsAt) < 4*time.Minute {
 		t.Fatalf("wrong firing payload: %+v", first)
 	}
@@ -184,7 +184,7 @@ func TestRunAlertDeliveryRetryResolutionAndRenewal(t *testing.T) {
 	}
 }
 
-func TestRunAlertDisabledAndMissingConsoleClaim(t *testing.T) {
+func TestRunAlertDisabledAndHubURLIsOmitted(t *testing.T) {
 	ctx := context.Background()
 	var received []outgoingAlert
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
@@ -226,7 +226,32 @@ func TestRunAlertDisabledAndMissingConsoleClaim(t *testing.T) {
 		t.Fatalf("re-enabling alerts did not notify current True state: %d", len(received))
 	}
 	if _, ok := received[0].Annotations["url"]; ok {
-		t.Fatalf("missing console claim should omit URL: %+v", received[0].Annotations)
+		t.Fatalf("missing hub console Route should omit URL: %+v", received[0].Annotations)
+	}
+}
+
+func hubConsoleRoute(host string) *unstructured.Unstructured {
+	route := &unstructured.Unstructured{}
+	route.SetGroupVersionKind(schema.GroupVersionKind{Group: "route.openshift.io", Version: "v1", Kind: "Route"})
+	route.SetName(hubConsoleRouteName)
+	route.SetNamespace(hubConsoleNamespace)
+	_ = unstructured.SetNestedField(route.Object, host, "spec", "host")
+	return route
+}
+
+func TestAgenticRunURLUsesHubConsoleRoute(t *testing.T) {
+	ctx := context.Background()
+	hub := fake.NewClientBuilder().WithScheme(newTestScheme(t)).WithObjects(hubConsoleRoute("console.hub.example.test")).Build()
+	r := &runAlertReconciler{reader: hub}
+	want := "https://console.hub.example.test/lightspeed/runs/openshift-lightspeed/telco-health-run"
+	if got := r.agenticRunURL(ctx, "telco-health-run"); got != want {
+		t.Fatalf("agenticRunURL = %q, want %q", got, want)
+	}
+	for _, host := range []string{"", "https://spoke.example.test", "spoke.example.test/path"} {
+		invalidHub := fake.NewClientBuilder().WithScheme(newTestScheme(t)).WithObjects(hubConsoleRoute(host)).Build()
+		if got := (&runAlertReconciler{reader: invalidHub}).agenticRunURL(ctx, "telco-health-run"); got != "" {
+			t.Fatalf("invalid hub console host %q generated URL %q", host, got)
+		}
 	}
 }
 

@@ -38,18 +38,6 @@ func makeManagedCluster(name string) *clusterv1.ManagedCluster {
 	}
 }
 
-func makeKubeconfigSecret(clusterName string) *corev1.Secret {
-	return &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      clusterName + "-admin-kubeconfig",
-			Namespace: clusterName,
-		},
-		Data: map[string][]byte{
-			"kubeconfig": []byte("kubeconfig-data-for-" + clusterName),
-		},
-	}
-}
-
 func TestGetMonitoredClusters_IncludeList(t *testing.T) {
 	scheme := newTestScheme(t)
 	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(
@@ -132,49 +120,5 @@ func TestGetMonitoredClusters_IncludeNonExistent(t *testing.T) {
 	}
 	if len(clusters) != 0 {
 		t.Errorf("expected 0 clusters, got %d: %v", len(clusters), clusters)
-	}
-}
-
-func TestGetClusterKubeconfig(t *testing.T) {
-	scheme := newTestScheme(t)
-	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(
-		makeKubeconfigSecret("my-cluster"),
-	).Build()
-
-	data, err := getClusterKubeconfig(context.Background(), c, "my-cluster")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if string(data) != "kubeconfig-data-for-my-cluster" {
-		t.Errorf("unexpected kubeconfig data: %q", string(data))
-	}
-}
-
-func TestGetClusterKubeconfig_MissingSecret(t *testing.T) {
-	scheme := newTestScheme(t)
-	c := fake.NewClientBuilder().WithScheme(scheme).Build()
-
-	_, err := getClusterKubeconfig(context.Background(), c, "missing-cluster")
-	if err == nil {
-		t.Error("expected error for missing secret, got nil")
-	}
-}
-
-func TestGetClusterKubeconfig_MissingKey(t *testing.T) {
-	scheme := newTestScheme(t)
-	secret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "cluster-x-admin-kubeconfig",
-			Namespace: "cluster-x",
-		},
-		Data: map[string][]byte{
-			"wrong-key": []byte("data"),
-		},
-	}
-	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(secret).Build()
-
-	_, err := getClusterKubeconfig(context.Background(), c, "cluster-x")
-	if err == nil {
-		t.Error("expected error for missing 'kubeconfig' key, got nil")
 	}
 }

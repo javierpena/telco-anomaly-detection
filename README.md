@@ -4,35 +4,35 @@ A Kubernetes operator that monitors telco workloads across Red Hat Advanced Clus
 
 ## Overview
 
-The operator runs on an ACM hub. It configures Thanos alert rules for monitored clusters; AlertManager sends fired alerts to a webhook. An alert, or an enabled periodic check, creates an `AgenticRun` in `openshift-lightspeed` on the affected spoke. The hub keeps a `TelcoHealthCheckRun` audit record and synchronizes the spoke run's condition and analysis result.
+The operator runs on an ACM hub. It configures Thanos alert rules for monitored clusters; AlertManager sends fired alerts to a webhook. An alert, or an enabled periodic check, creates an `AgenticRun` in `openshift-lightspeed` **on the hub**, with `spec.targetCluster` naming the affected spoke. The hub keeps a `TelcoHealthCheckRun` audit record and synchronizes the hub run's condition and analysis result.
 
 ```
 Spoke metrics → observability-addon → Hub Thanos Ruler → AlertManager
                                                    │ POST /webhook
                                                    ▼
                                             Hub Alert Receiver ──┐
-                                       Hub Controller (periodic) ─┴─► Spoke AgenticRun
+                                        Hub Controller (periodic) ─┴─► Hub AgenticRun (targetCluster: spoke)
                                                                      │
                                                                      ▼
                                                                OpenShift Lightspeed
 
-Spoke AgenticRun + AnalysisResult → Hub Controller watch → Hub TelcoHealthCheckRun
+Hub AgenticRun + AnalysisResult → Hub Controller watch → Hub TelcoHealthCheckRun
 ```
 
 ## Prerequisites
 
 - OpenShift hub cluster with ACM installed
 - ACM Multicluster Observability (MCO) operator deployed
-- OpenShift Lightspeed installed on each monitored spoke cluster
-- ACM `ManagedCluster` resources for spoke clusters, each with an `<name>-admin-kubeconfig` Secret in namespace `<name>`
-- Spoke kubeconfigs with access to create and read `AgenticRun` resources and list/watch `AgenticRun` and `AnalysisResult` resources in `openshift-lightspeed`
+- On the hub: compatible lightspeed-operator, lightspeed-agentic-operator (CRD with `spec.targetCluster`) and lightspeed-hub
+- A `HubConfig` named `cluster` with `spec.clusterRegistryMode: secret` (the checked-out hub does not yet implement `mce`)
+- An ACM `ManagedCluster` and a same-named, cluster-scoped `SpokeCluster` for each monitored spoke, with `spec.apiServer` and `spec.credentialSource.secret` referencing a kubeconfig supplied to lightspeed-hub. Check its `Connected` and `Provisioned` conditions and the resulting `spoke-kubeconfig-<name>` Secret in `openshift-lightspeed`. The telco operator does not read these credentials or connect to spokes.
 
 ## Components
 
 | Component | Description |
 |---|---|
-| **Controller** | Reconciles the singleton `TelcoHealthcheck`; manages Thanos rules, AlertManager, the MCO metrics allowlist, periodic checks, spoke status watches, and run-record cleanup |
-| **Alert Receiver** | HTTP webhook server (`POST /webhook`) that receives AlertManager payloads and creates AgenticRuns on the affected spoke cluster |
+| **Controller** | Reconciles the singleton `TelcoHealthcheck`; manages Thanos rules, AlertManager, the MCO metrics allowlist, periodic hub runs, hub-local run/result status reconciliation, and run-record cleanup |
+| **Alert Receiver** | HTTP webhook server (`POST /webhook`) that receives AlertManager payloads and creates targeted AgenticRuns on the hub |
 | **Skills OCI image** | OCI image containing Lightspeed skills referenced by the `skills` configuration of individual AgenticRuns |
 
 ## CRD: TelcoHealthcheck
@@ -90,7 +90,7 @@ spec:
 ```
 
 All periodic checks are opt-in. With a nonzero global period, each enabled check
-creates an `AgenticRun` on every monitored spoke when due. `rdsCompliance.period`
+creates a hub `AgenticRun` targeting every monitored spoke when due. `rdsCompliance.period`
 and `lowLatencyCheck.period` independently override the default interval. Enabling
 RDS compliance also deploys `kube-compare-mcp` in the operator namespace.
 
@@ -118,7 +118,7 @@ With `alerts.userAlerts: true`, the controller also includes labeled user-define
 
 ### Run records
 
-Each spoke run has a namespaced `TelcoHealthCheckRun` (`thcr`) audit record on the hub in `telco-healthcheck-system`. Its status tracks the latest AgenticRun condition type and reason (`agenticRunStatus.type` and `.phase`), an AnalysisResult summary, and `agenticRunActionRequired`. The action-required field follows `AnalysisResult.status.actionRequired` while the type is `Analyzed`; any other non-empty type sets it to `"False"`. It is omitted when the type is empty, or while `Analyzed` has no analysis value. Returning to `Analyzed` restores the current AnalysisResult value.
+Each hub run has a namespaced `TelcoHealthCheckRun` (`thcr`) audit record on the hub in `telco-healthcheck-system`. Its status tracks the latest AgenticRun condition type and reason (`agenticRunStatus.type` and `.phase`), an AnalysisResult summary, and `agenticRunActionRequired`. The action-required field follows the latest referenced `AnalysisResult.status.actionRequired` while the type is `Analyzed`; any other non-empty type sets it to `"False"`. It is omitted when the type is empty, or while `Analyzed` has no analysis value. Returning to `Analyzed` restores the current AnalysisResult value.
 
 ```bash
 oc get thcr -n telco-healthcheck-system
@@ -136,7 +136,7 @@ Set `spec.alertManager.url` to the external Alertmanager **base URL** to send `T
 kubectl -n telco-healthcheck-system create secret generic alertmanager-credentials --from-file=token=/path/to/token
 ```
 
-For basic auth, create the Secret with `--from-file=username=/path/to/username --from-file=password=/path/to/password` instead. The operator reads credentials for each delivery, so Secret rotation takes effect without restarting it. Failed deliveries remain queued for retry. Alerts include the run's cluster, summary, and AgenticRun name; when available, their URL links to the spoke console using the `ManagedCluster` console URL claim. See [architecture](docs/architecture.md#external-action-required-alerts) for delivery details.
+For basic auth, create the Secret with `--from-file=username=/path/to/username --from-file=password=/path/to/password` instead. The operator reads credentials for each delivery, so Secret rotation takes effect without restarting it. Failed deliveries remain queued for retry. Alerts include the run's cluster, summary, and AgenticRun name. When the hub `openshift-console/console` Route is available, the URL annotation links to `https://<hub-console-host>/lightspeed/runs/openshift-lightspeed/<AgenticRun name>`; otherwise it is omitted. See [architecture](docs/architecture.md#external-action-required-alerts) for delivery details.
 
 ## Getting Started
 
@@ -167,7 +167,9 @@ make container-push REGISTRY=quay.io/youruser
 make deploy
 ```
 
-This applies the CRDs, RBAC, validating webhook, Services, and Deployments. The operator runs in `telco-healthcheck-system`. The webhook uses an OpenShift service-CA serving certificate; wait for the controller Deployment to become Ready before creating the singleton CR, because admission fails until the webhook CA bundle is available.
+This applies the CRDs, RBAC, validating webhook, Services, and Deployments. The operator runs in `telco-healthcheck-system`; `openshift-lightspeed` and `open-cluster-management-observability` must exist before applying the namespaced RBAC. The webhook uses an OpenShift service-CA serving certificate; wait for the controller Deployment to become Ready before creating the singleton CR, because admission fails until the webhook CA bundle is available.
+
+**Upgrading from spoke-created runs:** save the current schedule settings, scale the old alert receiver to zero, and set `periodicHealthChecks.period` to `0s` to pause new creation. Allow any in-flight creates to finish. Leave the old controller running until no `TelcoHealthCheckRun` is annotated `ran.openshift.io/spoke-creation-pending: "true"`; investigate any record that does not resolve before proceeding. Deploy both new images, restore the schedule, and scale the receiver back up. Completed old records remain historical snapshots; new records carry `ran.openshift.io/hub-agentic-run: "true"` and are the only records recovered or synchronized from hub runs. A `Created` record only means the hub API accepted the AgenticRun; use its subsequent status for the investigation outcome.
 
 ### 5. Create a TelcoHealthcheck CR
 

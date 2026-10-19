@@ -1,4 +1,4 @@
-// Package healthcheckrun manages hub-side records of spoke AgenticRuns.
+// Package healthcheckrun manages hub-side records of targeted AgenticRuns.
 package healthcheckrun
 
 import (
@@ -6,7 +6,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
-	"strings"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -18,14 +17,15 @@ import (
 )
 
 const (
-	PendingAnnotation = "ran.openshift.io/spoke-creation-pending"
-	RunKeyLabel       = "ran.openshift.io/run-key"
-	PhasePending      = "Pending"
-	PhaseCreated      = "Created"
-	PhaseFailed       = "Failed"
+	PendingAnnotation   = "ran.openshift.io/spoke-creation-pending"
+	HubOriginAnnotation = "ran.openshift.io/hub-agentic-run"
+	RunKeyLabel         = "ran.openshift.io/run-key"
+	PhasePending        = "Pending"
+	PhaseCreated        = "Created"
+	PhaseFailed         = "Failed"
 )
 
-// Key is a stable, label-safe identifier for a run on one spoke.
+// Key is a stable, label-safe identifier for a run targeting one spoke.
 func Key(clusterName, runName string) string {
 	sum := sha256.Sum256([]byte(clusterName + "\x00" + runName))
 	// Kubernetes label values may not exceed 63 characters. 128 bits of
@@ -33,20 +33,7 @@ func Key(clusterName, runName string) string {
 	return hex.EncodeToString(sum[:16])
 }
 
-// Name uses the spoke run name for alerts and appends the cluster for periodic
-// runs, which share a spoke run name across several clusters.
-func Name(runName, clusterName string, periodic bool) string {
-	if !periodic {
-		return runName
-	}
-	name := runName + "-" + clusterName
-	if len(name) <= 253 {
-		return name
-	}
-	return strings.TrimRight(name[:253-17], "-.") + "-" + Key(clusterName, runName)[:16]
-}
-
-// Begin persists the run identity before attempting the spoke create. The
+// Begin persists the run identity before attempting the hub create. The
 // pending annotation lets the controller recover from a process crash or an
 // ambiguous network failure without creating a second AgenticRun.
 func Begin(ctx context.Context, c client.Client, namespace, name, runName, clusterName string,
@@ -62,7 +49,7 @@ func Begin(ctx context.Context, c client.Client, namespace, name, runName, clust
 				"app.kubernetes.io/managed-by": "telco-anomaly-detection",
 				RunKeyLabel:                    Key(clusterName, runName),
 			},
-			Annotations: map[string]string{PendingAnnotation: "true"},
+			Annotations: map[string]string{PendingAnnotation: "true", HubOriginAnnotation: "true"},
 			OwnerReferences: []metav1.OwnerReference{{
 				APIVersion: ranv1alpha1.GroupVersion.String(), Kind: "TelcoHealthcheck",
 				Name: owner.Name, UID: owner.UID,
@@ -78,20 +65,20 @@ func Begin(ctx context.Context, c client.Client, namespace, name, runName, clust
 		AgenticRunStatus: &ranv1alpha1.AgenticRunStatus{Phase: PhasePending},
 	}
 	if err := c.Status().Update(ctx, record); err != nil {
-		// No spoke create can be attempted without a complete durable identity.
+		// No run create can be attempted without a complete durable identity.
 		return nil, fmt.Errorf("setting pending hub record status %s: %w", name, err)
 	}
 	return record, nil
 }
 
-// Confirm marks an existing record as paired with a created spoke run.
+// Confirm marks an existing record as paired with a created hub run.
 func Confirm(ctx context.Context, c client.Client, namespace, name string) error {
 	return finishCreation(ctx, c, namespace, name, PhaseCreated)
 }
 
-// Fail records a confirmed spoke creation failure without discarding the
+// Fail records a confirmed hub creation failure without discarding the
 // hub-side audit trail. Ambiguous errors must instead remain Pending until
-// recovery checks whether the spoke run exists.
+// recovery checks whether the hub run exists.
 func Fail(ctx context.Context, c client.Client, namespace, name string) error {
 	return finishCreation(ctx, c, namespace, name, PhaseFailed)
 }

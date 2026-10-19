@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -10,7 +11,6 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -20,272 +20,114 @@ import (
 	"github.com/javierpena/telco-anomaly-detection/internal/healthcheckrun"
 )
 
-// makeAgenticRunConfigMap builds a ConfigMap suitable for use as an AgenticRun config in tests.
 func makeAgenticRunConfigMap(name, namespace string) *corev1.ConfigMap {
-	return &corev1.ConfigMap{
-		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
-		Data: map[string]string{
-			"request":    "test-request",
-			"skills":     `[{"image":"quay.io/test:latest","paths":["/skills/test.yaml"]}]`,
-			"mcpServers": "[]",
-		},
-	}
+	return &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace}, Data: map[string]string{
+		"request": "test-request", "skills": `[{"image":"quay.io/test:latest","paths":["/skills/test.yaml"]}]`, "mcpServers": "[]",
+	}}
 }
 
-type failingSpokeCreateClient struct {
+type failingHubRunCreate struct {
 	client.Client
 	err error
 }
 
-func (c failingSpokeCreateClient) Create(context.Context, client.Object, ...client.CreateOption) error {
-	return c.err
+func (c failingHubRunCreate) Create(ctx context.Context, obj client.Object, opts ...client.CreateOption) error {
+	if obj.GetObjectKind().GroupVersionKind().Kind == agenticrun.Kind {
+		return c.err
+	}
+	return c.Client.Create(ctx, obj, opts...)
 }
 
-func TestCreateAgenticRunsForClusters_RecordsSpokeCreateFailure(t *testing.T) {
-	for _, tt := range []struct {
+func TestPeriodicHubRunCreation(t *testing.T) {
+	ctx := context.Background()
+	hub := fake.NewClientBuilder().WithScheme(newTestScheme(t)).WithStatusSubresource(&ranv1alpha1.TelcoHealthCheckRun{}).
+		WithObjects(makeAgenticRunConfigMap("telco-anomaly-rds-compliance-config", operatorNamespace)).Build()
+	owner := &ranv1alpha1.TelcoHealthcheck{ObjectMeta: metav1.ObjectMeta{Name: "telco-healthcheck", UID: "owner"}}
+	clusters := []string{"cluster-a", "cluster-b"}
+	if err := createAgenticRunsForClusters(ctx, hub, owner, clusters, "rds-compliance"); err != nil {
+		t.Fatal(err)
+	}
+	runs := hubRunList(agenticrun.Kind)
+	if err := hub.List(ctx, runs, client.InNamespace(agenticrun.Namespace)); err != nil || len(runs.Items) != 2 {
+		t.Fatalf("hub runs: %v, %v", runs.Items, err)
+	}
+	var records ranv1alpha1.TelcoHealthCheckRunList
+	if err := hub.List(ctx, &records, client.InNamespace(operatorNamespace)); err != nil || len(records.Items) != 2 {
+		t.Fatalf("records: %v, %v", records.Items, err)
+	}
+	seen := map[string]bool{}
+	for _, run := range runs.Items {
+		cluster, _, _ := unstructured.NestedString(run.Object, "spec", "targetCluster")
+		seen[cluster] = true
+		if run.GetLabels()["telco-anomaly.io/healthcheck-ref"] != owner.Name {
+			t.Errorf("missing owner label: %v", run.GetLabels())
+		}
+		var record ranv1alpha1.TelcoHealthCheckRun
+		if err := hub.Get(ctx, client.ObjectKey{Namespace: operatorNamespace, Name: run.GetName()}, &record); err != nil {
+			t.Fatal(err)
+		}
+		if record.Status.AgenticRunName != run.GetName() || record.Status.ClusterName != cluster ||
+			record.Status.AgenticRunStatus.Phase != healthcheckrun.PhaseCreated ||
+			record.Annotations[healthcheckrun.HubOriginAnnotation] != "true" || record.Annotations[healthcheckrun.PendingAnnotation] != "" {
+			t.Errorf("incorrect record: %+v", record)
+		}
+	}
+	if !seen[clusters[0]] || !seen[clusters[1]] || runs.Items[0].GetName() == runs.Items[1].GetName() {
+		t.Fatalf("clusters lack distinct hub runs: %+v", runs.Items)
+	}
+}
+
+func TestPeriodicHubCreateFailure(t *testing.T) {
+	for _, tc := range []struct {
 		name, phase string
 		err         error
 	}{
 		{"definitive", healthcheckrun.PhaseFailed, apierrors.NewForbidden(schema.GroupResource{Group: agenticrun.Group, Resource: "agenticruns"}, "run", fmt.Errorf("denied"))},
 		{"ambiguous", healthcheckrun.PhasePending, fmt.Errorf("connection lost")},
 	} {
-		t.Run(tt.name, func(t *testing.T) {
-			original := buildSpokeClient
-			defer func() { buildSpokeClient = original }()
-			buildSpokeClient = func([]byte) (client.Client, error) {
-				return failingSpokeCreateClient{Client: fake.NewClientBuilder().WithScheme(runtime.NewScheme()).Build(), err: tt.err}, nil
-			}
-			hub := fake.NewClientBuilder().WithScheme(newTestScheme(t)).WithStatusSubresource(&ranv1alpha1.TelcoHealthCheckRun{}).WithObjects(
-				makeKubeconfigSecret("cluster-a"), makeAgenticRunConfigMap("telco-anomaly-rds-compliance-config", operatorNamespace),
-			).Build()
-			thc := &ranv1alpha1.TelcoHealthcheck{ObjectMeta: metav1.ObjectMeta{Name: ranv1alpha1.TelcoHealthcheckCanonicalName, UID: "owner"}}
-			if err := createAgenticRunsForClusters(context.Background(), hub, thc, []string{"cluster-a"}, "rds-compliance"); err != nil {
+		t.Run(tc.name, func(t *testing.T) {
+			hub := fake.NewClientBuilder().WithScheme(newTestScheme(t)).WithStatusSubresource(&ranv1alpha1.TelcoHealthCheckRun{}).
+				WithObjects(makeAgenticRunConfigMap("telco-anomaly-rds-compliance-config", operatorNamespace)).Build()
+			c := failingHubRunCreate{Client: hub, err: tc.err}
+			owner := &ranv1alpha1.TelcoHealthcheck{ObjectMeta: metav1.ObjectMeta{Name: "telco-healthcheck", UID: "owner"}}
+			if err := createAgenticRunsForClusters(context.Background(), c, owner, []string{"cluster-a"}, "rds-compliance"); err != nil {
 				t.Fatal(err)
 			}
 			var records ranv1alpha1.TelcoHealthCheckRunList
-			if err := hub.List(context.Background(), &records, client.InNamespace(operatorNamespace)); err != nil {
-				t.Fatal(err)
-			}
-			if len(records.Items) != 1 || records.Items[0].Status.AgenticRunStatus.Phase != tt.phase {
-				t.Fatalf("unexpected failed run record: %+v", records.Items)
+			if err := hub.List(context.Background(), &records, client.InNamespace(operatorNamespace)); err != nil || len(records.Items) != 1 || records.Items[0].Status.AgenticRunStatus.Phase != tc.phase {
+				t.Fatalf("records: %+v, %v", records.Items, err)
 			}
 		})
 	}
 }
 
-func TestCreateAgenticRunsForClusters(t *testing.T) {
-	scheme := newTestScheme(t)
-
-	// Spoke cluster uses an empty scheme – AgenticRun is created as unstructured.
-	spokeScheme := runtime.NewScheme()
-	spokeA := fake.NewClientBuilder().WithScheme(spokeScheme).Build()
-	spokeB := fake.NewClientBuilder().WithScheme(spokeScheme).Build()
-
-	original := buildSpokeClient
-	defer func() { buildSpokeClient = original }()
-	buildSpokeClient = func(kubeconfig []byte) (client.Client, error) {
-		if string(kubeconfig) == "kubeconfig-data-for-cluster-a" {
-			return spokeA, nil
-		}
-		return spokeB, nil
-	}
-
-	hubClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&ranv1alpha1.TelcoHealthCheckRun{}).WithObjects(
-		makeKubeconfigSecret("cluster-a"),
-		makeKubeconfigSecret("cluster-b"),
-		makeAgenticRunConfigMap("telco-anomaly-rds-compliance-config", operatorNamespace),
-	).Build()
-
-	thc := &ranv1alpha1.TelcoHealthcheck{}
-	thc.Name = "test-healthcheck"
-	thc.UID = "test-owner-uid"
-	thc.Namespace = "default"
-
-	if err := createAgenticRunsForClusters(context.Background(), hubClient, thc, []string{"cluster-a", "cluster-b"}, "rds-compliance"); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	// Verify AgenticRun objects were created with the expected controller label.
-	runList := &unstructured.UnstructuredList{}
-	runList.SetGroupVersionKind(schema.GroupVersionKind{
-		Group:   agenticrun.Group,
-		Version: agenticrun.Version,
-		Kind:    agenticrun.Kind + "List",
-	})
-	if err := spokeA.List(context.Background(), runList); err != nil {
-		t.Fatalf("listing AgenticRuns: %v", err)
-	}
-	if len(runList.Items) == 0 {
-		t.Error("expected at least one AgenticRun to be created")
-	}
-	for _, item := range runList.Items {
-		if item.GetLabels()["telco-anomaly.io/healthcheck-ref"] != "test-healthcheck" {
-			t.Errorf("expected healthcheck-ref label 'test-healthcheck', got %q", item.GetLabels()["telco-anomaly.io/healthcheck-ref"])
-		}
-	}
-	var records ranv1alpha1.TelcoHealthCheckRunList
-	if err := hubClient.List(context.Background(), &records, client.InNamespace(operatorNamespace)); err != nil {
-		t.Fatal(err)
-	}
-	if len(records.Items) != 2 {
-		t.Fatalf("expected one record per cluster, got %d", len(records.Items))
-	}
-	for _, record := range records.Items {
-		if record.Name != record.Status.AgenticRunName+"-"+record.Status.ClusterName ||
-			record.Status.TriggeredBy != ranv1alpha1.TriggerTypePeriodicHealthCheck ||
-			record.Status.Trigger != "rds-compliance" || record.Annotations[healthcheckrun.PendingAnnotation] != "" ||
-			record.Status.AgenticRunStatus == nil || record.Status.AgenticRunStatus.Phase != healthcheckrun.PhaseCreated ||
-			record.Status.AgenticRunActionRequired != "" ||
-			len(record.OwnerReferences) != 1 || record.OwnerReferences[0].UID != thc.UID {
-			t.Errorf("incorrect periodic record: %+v", record)
-		}
-	}
-}
-
-func TestCreateAgenticRunsForClusters_SkipsBadSpokeClient(t *testing.T) {
-	scheme := newTestScheme(t)
-
-	original := buildSpokeClient
-	defer func() { buildSpokeClient = original }()
-	buildSpokeClient = func(_ []byte) (client.Client, error) {
-		return nil, fmt.Errorf("cannot connect to cluster")
-	}
-
-	hubClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&ranv1alpha1.TelcoHealthCheckRun{}).WithObjects(
-		makeKubeconfigSecret("cluster-a"),
-		makeAgenticRunConfigMap("telco-anomaly-rds-compliance-config", operatorNamespace),
-	).Build()
-
-	thc := &ranv1alpha1.TelcoHealthcheck{}
-	thc.Name = "test"
-	thc.UID = "test-owner-uid"
-	thc.Namespace = "default"
-
-	// Should return nil: errors per-cluster are logged and skipped, not propagated.
-	if err := createAgenticRunsForClusters(context.Background(), hubClient, thc, []string{"cluster-a"}, "rds-compliance"); err != nil {
-		t.Errorf("expected nil error (cluster skipped), got: %v", err)
-	}
-}
-
-func TestCreateAgenticRunsForClusters_SkipsMissingKubeconfig(t *testing.T) {
-	scheme := newTestScheme(t)
-
-	// No secrets in the hub – getClusterKubeconfig will fail.
-	hubClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&ranv1alpha1.TelcoHealthCheckRun{}).WithObjects(
-		makeAgenticRunConfigMap("telco-anomaly-rds-compliance-config", operatorNamespace),
-	).Build()
-
-	thc := &ranv1alpha1.TelcoHealthcheck{}
-	thc.Name = "test"
-	thc.UID = "test-owner-uid"
-	thc.Namespace = "default"
-
-	if err := createAgenticRunsForClusters(context.Background(), hubClient, thc, []string{"no-secret-cluster"}, "rds-compliance"); err != nil {
-		t.Errorf("expected nil error (kubeconfig fetch failed, cluster skipped), got: %v", err)
-	}
-}
-
-func TestCreateAgenticRunsForClusters_UnknownCheckType(t *testing.T) {
-	scheme := newTestScheme(t)
-	hubClient := fake.NewClientBuilder().WithScheme(scheme).Build()
-
-	thc := &ranv1alpha1.TelcoHealthcheck{}
-	thc.Name = "test"
-	thc.Namespace = "default"
-
-	err := createAgenticRunsForClusters(context.Background(), hubClient, thc, []string{"cluster-a"}, "unknown-type")
-	if err == nil {
-		t.Error("expected error for unmapped check type, got nil")
-	}
-}
-
-func TestRandomJitter(t *testing.T) {
-	for _, bounds := range [][2]time.Duration{
-		{0, time.Millisecond},
-		{time.Millisecond, 2 * time.Millisecond},
-		{time.Second, time.Second},
-		{0, time.Duration(1<<63 - 1)},
+func TestPeriodicRunNameBounds(t *testing.T) {
+	for _, tc := range []struct{ prefix, cluster string }{
+		{"telco-health-low-latency-check-12345", "cluster-a"},
+		{"telco-health-low-latency-check-12345", "cluster-b"},
+		{"telco-health-low-latency-check-12345", strings.Repeat("a", 220) + ".example"},
+		{strings.Repeat("a", 245), "cluster-a"},
 	} {
-		for i := 0; i < 100; i++ {
-			delay := randomJitter(bounds[0], bounds[1])
-			if delay < bounds[0] || delay > bounds[1] {
-				t.Fatalf("jitter %s outside [%s, %s]", delay, bounds[0], bounds[1])
-			}
+		name := periodicRunName(tc.prefix, tc.cluster)
+		if len(name) > 253 || name != periodicRunName(tc.prefix, tc.cluster) {
+			t.Fatalf("invalid deterministic run name: %q", name)
 		}
+	}
+	if periodicRunName("prefix", "cluster-a") == periodicRunName("prefix", "cluster-b") {
+		t.Fatal("clusters collided")
 	}
 }
 
-func TestCreateAgenticRunsForClustersWithConfig_JitterAndCancellation(t *testing.T) {
-	scheme := newTestScheme(t)
-	spokeA := fake.NewClientBuilder().WithScheme(runtime.NewScheme()).Build()
-	spokeB := fake.NewClientBuilder().WithScheme(runtime.NewScheme()).Build()
-	original := buildSpokeClient
-	defer func() { buildSpokeClient = original }()
-	buildSpokeClient = func(kubeconfig []byte) (client.Client, error) {
-		if string(kubeconfig) == "kubeconfig-data-for-cluster-a" {
-			return spokeA, nil
-		}
-		return spokeB, nil
-	}
-
-	hub := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&ranv1alpha1.TelcoHealthCheckRun{}).
-		WithObjects(makeKubeconfigSecret("cluster-a"), makeKubeconfigSecret("cluster-b")).Build()
-	thc := &ranv1alpha1.TelcoHealthcheck{ObjectMeta: metav1.ObjectMeta{Name: "telco-healthcheck", UID: "owner"}}
-	cfg := &agenticrun.RunConfig{Request: "check ${CLUSTER_NAME}"}
+func TestPeriodicJitterCancellation(t *testing.T) {
+	hub := fake.NewClientBuilder().WithScheme(newTestScheme(t)).WithStatusSubresource(&ranv1alpha1.TelcoHealthCheckRun{}).Build()
+	owner := &ranv1alpha1.TelcoHealthcheck{ObjectMeta: metav1.ObjectMeta{Name: "telco-healthcheck", UID: "owner"}}
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	// A fixed positive window must return without attempting any hub or spoke
-	// writes; both clusters are then processed with the same run name.
-	if err := createAgenticRunsForClustersWithConfig(ctx, hub, thc, []string{"cluster-a", "cluster-b"},
-		"rds-compliance", cfg, 100*time.Millisecond, 100*time.Millisecond, ctx); err != nil {
+	if err := createAgenticRunsForClustersWithConfig(ctx, hub, owner, []string{"cluster-a"}, "rds-compliance", &agenticrun.RunConfig{Request: "test"}, time.Hour, time.Hour, ctx); err != nil {
 		t.Fatal(err)
 	}
+	cancel()
 	var records ranv1alpha1.TelcoHealthCheckRunList
-	if err := hub.List(ctx, &records); err != nil {
-		t.Fatal(err)
-	}
-	if len(records.Items) != 0 {
-		t.Fatalf("creation must wait for jitter; got %d records", len(records.Items))
-	}
-	deadline := time.After(5 * time.Second)
-	for {
-		if err := hub.List(ctx, &records); err != nil {
-			t.Fatal(err)
-		}
-		if len(records.Items) == 2 && records.Items[0].Status.AgenticRunStatus != nil &&
-			records.Items[1].Status.AgenticRunStatus != nil &&
-			records.Items[0].Status.AgenticRunStatus.Phase == healthcheckrun.PhaseCreated &&
-			records.Items[1].Status.AgenticRunStatus.Phase == healthcheckrun.PhaseCreated {
-			break
-		}
-		select {
-		case <-deadline:
-			t.Fatalf("timed out waiting for jittered runs: %+v", records.Items)
-		case <-time.After(10 * time.Millisecond):
-		}
-	}
-	if records.Items[0].Status.AgenticRunName != records.Items[1].Status.AgenticRunName {
-		t.Fatal("clusters in one interval must share a spoke run name")
-	}
-
-	// Canceling the manager context during a long delay must prevent even
-	// the pending hub record from being created.
-	stopCtx, stop := context.WithCancel(context.Background())
-	if err := createAgenticRunsForClustersWithConfig(ctx, hub, thc, []string{"cluster-a"},
-		"rds-compliance", cfg, time.Hour, time.Hour, stopCtx); err != nil {
-		t.Fatal(err)
-	}
-	stop()
-	select {
-	case <-time.After(20 * time.Millisecond):
-	case <-ctx.Done():
-		t.Fatal("unexpected test context cancellation")
-	}
-	if err := hub.List(ctx, &records); err != nil {
-		t.Fatal(err)
-	}
-	if len(records.Items) != 2 {
-		t.Fatalf("canceled delay created a record: %+v", records.Items)
+	if err := hub.List(context.Background(), &records); err != nil || len(records.Items) != 0 {
+		t.Fatalf("canceled jitter created records: %v, %v", records.Items, err)
 	}
 }

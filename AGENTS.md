@@ -58,22 +58,22 @@ Reconciles the singleton `TelcoHealthcheck` CR and watches `ManagedCluster` even
 1. Resolves monitored clusters via `managedcluster.go` (honors include/exclude against ACM `ManagedCluster` list).
 2. Reconciles the Thanos alert rules ConfigMap (`thanos-ruler-custom-rules` in `open-cluster-management-observability`).
 3. Configures the AlertManager receiver in the `alertmanager-config` Secret (same namespace) to POST to the alert receiver webhook.
-4. Triggers periodic `AgenticRun` creation on each spoke cluster when the configured period elapses; requeues for the next due check.
+4. Triggers periodic `AgenticRun` creation on the hub, each with `spec.targetCluster` naming its spoke; requeues for the next due check. A separate run-record controller watches hub AgenticRuns and AnalysisResults.
 
 **Key namespaces:**
 - Operator: `telco-healthcheck-system`
 - ACM Observability: `open-cluster-management-observability`
-- AgenticRun target (spoke): `openshift-lightspeed`
+- AgenticRuns and AnalysisResults (hub): `openshift-lightspeed`
 
-**ManagedCluster kubeconfigs:** Secret `<name>-admin-kubeconfig` in namespace `<name>`.
+**Spoke access:** lightspeed-hub and lightspeed-agentic-operator manage spoke access. The telco operator does not read spoke kubeconfigs or connect to spoke APIs.
 
 ### Alert receiver (`internal/alertreceiver/`)
 
-HTTP server listening on `:8080`. `POST /webhook` accepts AlertManager JSON payloads. For each alert, validates `labels.cluster` against monitored clusters and `labels.alertname` against Thanos rule names, then creates an `AgenticRun` on the matching spoke cluster.
+HTTP server listening on `:8080`. `POST /webhook` accepts AlertManager JSON payloads. For each alert, validates `labels.cluster` against monitored clusters and `labels.alertname` against Thanos rule names, then creates a hub AgenticRun targeting the matching spoke.
 
 ### AgenticRun (`internal/agenticrun/types.go`)
 
-`agentic.openshift.io/v1alpha1` — no published Go client library exists, so objects are created via the unstructured client. Type constants (`Group`, `Version`, `Kind`) live in `internal/agenticrun/types.go`. AgenticRuns are always created in `openshift-lightspeed` on the spoke cluster.
+`agentic.openshift.io/v1alpha1` — objects are created via the unstructured client. Type constants (`Group`, `Version`, `Kind`) live in `internal/agenticrun/types.go`. AgenticRuns are created in `openshift-lightspeed` on the hub; `spec.targetCluster` names the spoke.
 
 ## Code generation
 

@@ -9,11 +9,13 @@ import (
 	uberzap "go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 	admissionregistrationv1 "k8s.io/api/admissionregistration/v1"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	clusterv1 "open-cluster-management.io/api/cluster/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	ctrlzap "sigs.k8s.io/controller-runtime/pkg/log/zap"
@@ -22,6 +24,7 @@ import (
 	ctrlwebhook "sigs.k8s.io/controller-runtime/pkg/webhook"
 
 	ranv1alpha1 "github.com/javierpena/telco-anomaly-detection/api/v1alpha1"
+	"github.com/javierpena/telco-anomaly-detection/internal/agenticrun"
 	"github.com/javierpena/telco-anomaly-detection/internal/controller"
 	"github.com/javierpena/telco-anomaly-detection/internal/webhook"
 )
@@ -90,6 +93,13 @@ func main() {
 
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
 		Scheme: scheme,
+		Cache: cache.Options{ByObject: map[client.Object]cache.ByObject{
+			&corev1.Secret{}: {Namespaces: map[string]cache.Config{
+				operatorNamespace: {}, "open-cluster-management-observability": {}, "openshift-config": {},
+			}},
+			controller.HubRunObject(agenticrun.Kind):  {Namespaces: map[string]cache.Config{agenticrun.Namespace: {}}},
+			controller.HubRunObject("AnalysisResult"): {Namespaces: map[string]cache.Config{agenticrun.Namespace: {}}},
+		}},
 		Metrics: metricsserver.Options{
 			BindAddress: metricsAddr,
 		},
