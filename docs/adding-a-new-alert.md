@@ -35,7 +35,7 @@ A system alert is packaged with the operator. Its full definition (rule, metrics
 
 ### Step 1 — Create the asset YAML file
 
-Create `internal/controller/assets/alert-<name>.yaml` with all seven data fields:
+Create `internal/controller/assets/alert-<name>.yaml` with the alert configuration fields below. Include `alertUserWorkloadMetrics` when the alert needs metrics from user-workload monitoring:
 
 ```yaml
 apiVersion: v1
@@ -57,6 +57,7 @@ data:
       annotations:
         cluster: '{{ $labels.cluster }}'
   alertMetrics: '["metric_one_total","metric_two_total"]'
+  alertUserWorkloadMetrics: '["application_requests_total"]'  # optional
   request: |
     You are an experienced OpenShift administrator. Alert TelcoHealthCheck<Name>
     has been raised for this cluster. <investigation instructions for Lightspeed>
@@ -71,10 +72,13 @@ data:
 | `alertName` | String | Must match the `alert:` value in `alertRule`; used by the alert receiver to locate this CM |
 | `alertGroupName` | String | Prometheus rule group name; must be unique across all system alerts |
 | `alertRule` | YAML block scalar | The `- alert: ...` block (without the `groups:` wrapper) |
-| `alertMetrics` | JSON array string | Metrics to add to the MCO allowlist; `"[]"` if none needed |
+| `alertMetrics` | JSON array string | Platform metrics to add to `metrics_list.yaml` in the MCO allowlist; `"[]"` if none needed |
+| `alertUserWorkloadMetrics` | JSON array string | Optional user-workload metrics to add to `uwl_metrics_list.yaml`; omit, use an empty string, or `"[]"` if none needed |
 | `request` | String | Lightspeed prompt; supports `${CLUSTER_NAME}`, `${NODE_NAME}`, `${KUBE_COMPARE_MCP_URL}` |
 | `skills` | JSON array string | OCI skills image config; `"[]"` if none |
 | `mcpServers` | JSON array string | MCP server config; `"[]"` if none |
+
+Both metric fields use the [metric-source selection and validation rules](#metric-source-selection-and-validation) described below for user-defined alerts.
 
 ### Step 2 — Wire the asset in `systemalerts.go`
 
@@ -147,7 +151,7 @@ labels:
   ran.openshift.io/user-managed-alert: "true"
 ```
 
-### Required data fields
+### Data fields
 
 ```yaml
 data:
@@ -161,7 +165,8 @@ data:
         severity: warning
       annotations:
         cluster: '{{ $labels.cluster }}'
-  alertMetrics: '["my_custom_metric_total"]'  # JSON array; "[]" if none
+  alertMetrics: '["my_custom_metric_total"]'  # platform metrics; "[]" if none
+  alertUserWorkloadMetrics: '["application_requests_total"]'  # optional user-workload metrics
   request: |
     You are an experienced OpenShift administrator. Alert MyCustomAlert has been raised.
     <investigation instructions for Lightspeed>
@@ -171,9 +176,22 @@ data:
 
 The `alertRule` block is the Prometheus alert rule body — the `- alert: ...` item. The controller wraps it in a rule group using `alertGroupName` (or the default) as the group name.
 
-`alertMetrics` is a JSON array of raw metric names that must be forwarded from spoke clusters to the hub via MCO. Omit metrics that are already covered by MCO's built-in recording rules.
-
 `request`, `skills`, and `mcpServers` are read by the alert receiver when building the `AgenticRun`. If `request` is empty, the AgenticRun is skipped with an error log.
+
+### Metric-source selection and validation
+
+Both system-managed and user-managed alert ConfigMaps support two independent JSON arrays of raw metric names to forward from spokes to the hub through MCO:
+
+| Field | Metric source | Key in `observability-metrics-custom-allowlist` |
+|---|---|---|
+| `alertMetrics` | Platform monitoring | `metrics_list.yaml` |
+| `alertUserWorkloadMetrics` (optional) | User-workload monitoring | `uwl_metrics_list.yaml` |
+
+Alert ownership does not determine the metric source: a user-managed alert can request platform metrics, and a system-managed alert can request user-workload metrics. Use either or both fields according to where the metrics are collected. Omit metrics already covered by MCO's built-in recording rules.
+
+An omitted field, empty string, or `[]` contributes no metrics. Otherwise, `alertUserWorkloadMetrics` must be a JSON array of strings; JSON `null`, non-array values, and non-string entries are invalid. An alert definition with invalid metric-field data is logged and skipped in its entirety: neither its Thanos rule nor its metrics are generated.
+
+The controller deduplicates metric names independently within each destination list. A name declared in both fields appears in both lists. Both keys are always written in the allowlist ConfigMap in `open-cluster-management-observability`, using `names: []` when a list is empty. Reconciliation removes stale metrics when fields or alert definitions are removed or user alerts are disabled.
 
 ### Enable user-defined alerts in the CR
 
@@ -191,6 +209,6 @@ After creating or updating a user-alert ConfigMap:
 
 1. Wait for the next reconcile (or trigger one by touching the `TelcoHealthcheck` CR).
 2. Confirm the `thanos-ruler-custom-rules` ConfigMap in `open-cluster-management-observability` contains the new rule group.
-3. Confirm the `observability-metrics-custom-allowlist` ConfigMap lists any new metrics.
+3. Confirm the `observability-metrics-custom-allowlist` ConfigMap in `open-cluster-management-observability` lists platform metrics under `metrics_list.yaml` and user-workload metrics under `uwl_metrics_list.yaml`.
 4. Fire the alert and verify the alert receiver logs `matched alert – creating AgenticRun`.
 5. Check that an `AgenticRun` appears in `openshift-lightspeed` on the hub, with `spec.targetCluster` set to the intended spoke.

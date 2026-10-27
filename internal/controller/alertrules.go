@@ -116,7 +116,7 @@ func listAllAlertConfigs(ctx context.Context, c client.Client, namespace string,
 	for _, cm := range sysCMs.Items {
 		cfg, ok := parseAlertConfigMap(cm)
 		if !ok {
-			logger.Info("system-alert ConfigMap missing alertName or alertRule, skipping", "configmap", cm.Name)
+			logger.Info("system-alert ConfigMap missing alertName or alertRule, or has invalid alertMetrics or alertUserWorkloadMetrics, skipping", "configmap", cm.Name)
 			continue
 		}
 		all = append(all, cfg)
@@ -136,7 +136,7 @@ func listAllAlertConfigs(ctx context.Context, c client.Client, namespace string,
 		for _, cm := range userCMs.Items {
 			cfg, ok := parseAlertConfigMap(cm)
 			if !ok {
-				logger.Info("user-alert ConfigMap missing alertName or alertRule, skipping", "configmap", cm.Name)
+				logger.Info("user-alert ConfigMap missing alertName or alertRule, or has invalid alertMetrics or alertUserWorkloadMetrics, skipping", "configmap", cm.Name)
 				continue
 			}
 			all = append(all, cfg)

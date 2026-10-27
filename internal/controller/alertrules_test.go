@@ -193,6 +193,56 @@ func TestReconcileAlertRules_NoSystemCMs_EmptyRules(t *testing.T) {
 	}
 }
 
+func TestReconcileAlertRules_InvalidUserWorkloadMetricsSkipped(t *testing.T) {
+	for _, alertType := range []string{"system", "user"} {
+		t.Run(alertType, func(t *testing.T) {
+			valid := makeAlertCM("valid-alert", "ValidAlert", "valid", "- alert: ValidAlert\n  expr: up == 0")
+			valid.Data["alertUserWorkloadMetrics"] = `["valid_app_metric"]`
+			invalid := makeAlertCM("invalid-alert", "InvalidAlert", "invalid", "- alert: InvalidAlert\n  expr: up == 0")
+			invalid.Data["alertMetrics"] = `["invalid_alert_platform_metric"]`
+			invalid.Data["alertUserWorkloadMetrics"] = "not-valid-json"
+			if alertType == "user" {
+				for _, cm := range []*corev1.ConfigMap{valid, invalid} {
+					delete(cm.Labels, systemAlertLabel)
+					cm.Labels[userAlertLabel] = userAlertLabelValue
+				}
+			}
+			c := fake.NewClientBuilder().WithScheme(newTestScheme(t)).WithObjects(valid, invalid).Build()
+			ctx := context.Background()
+			if err := reconcileAlertRules(ctx, c, "test-ns", true); err != nil {
+				t.Fatalf("reconciling rules: %v", err)
+			}
+			cm := &corev1.ConfigMap{}
+			if err := c.Get(ctx, types.NamespacedName{
+				Name: thanosRulerConfigMap, Namespace: observabilityNamespace,
+			}, cm); err != nil {
+				t.Fatalf("rules ConfigMap not found: %v", err)
+			}
+			names, err := parseAlertNamesFromRulesYAML(cm.Data[customRulesKey])
+			if err != nil {
+				t.Fatalf("parsing rule names: %v", err)
+			}
+			if len(names) != 1 || !names["ValidAlert"] {
+				t.Errorf("expected only ValidAlert, got %v", names)
+			}
+			if err := reconcileObservabilityMetrics(ctx, c, "test-ns", true); err != nil {
+				t.Fatalf("reconciling metrics: %v", err)
+			}
+			if err := c.Get(ctx, types.NamespacedName{
+				Name: observabilityMetricsConfigMap, Namespace: observabilityNamespace,
+			}, cm); err != nil {
+				t.Fatalf("allowlist ConfigMap not found: %v", err)
+			}
+			if got := cm.Data[metricsListKey]; got != "names: []\n" {
+				t.Errorf("invalid alert contributed platform metrics: %q", got)
+			}
+			if got, want := cm.Data[userWorkloadMetricsListKey], "names:\n  - valid_app_metric\n"; got != want {
+				t.Errorf("workload list: got %q, want %q", got, want)
+			}
+		})
+	}
+}
+
 func TestReconcileAlertRules_UserAlertsIncludedWhenEnabled(t *testing.T) {
 	scheme := newTestScheme(t)
 	userCM := &corev1.ConfigMap{

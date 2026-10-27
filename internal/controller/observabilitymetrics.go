@@ -15,12 +15,13 @@ import (
 const (
 	observabilityMetricsConfigMap = "observability-metrics-custom-allowlist"
 	metricsListKey                = "metrics_list.yaml"
+	userWorkloadMetricsListKey    = "uwl_metrics_list.yaml"
 )
 
 // reconcileObservabilityMetrics creates or updates the observability-metrics-custom-allowlist
 // ConfigMap in the open-cluster-management-observability namespace. It lists system-alert and
-// (when enabled) user-alert ConfigMaps in namespace and builds the metric list from their
-// alertMetrics fields.
+// (when enabled) user-alert ConfigMaps in namespace and builds separate metric lists from
+// their alertMetrics and alertUserWorkloadMetrics fields.
 func reconcileObservabilityMetrics(ctx context.Context, c client.Client, namespace string, userAlertsEnabled bool) error {
 	logger := log.FromContext(ctx)
 	logger.Info("reconciling observability metrics allowlist",
@@ -32,8 +33,9 @@ func reconcileObservabilityMetrics(ctx context.Context, c client.Client, namespa
 		return fmt.Errorf("listing alert configs for metrics: %w", err)
 	}
 
-	metricsContent := buildMetricsListYAML(allAlerts)
+	metricsContent, userWorkloadMetricsContent := buildMetricsListYAML(allAlerts)
 	logger.V(1).Info("built metrics_list.yaml", "content", metricsContent)
+	logger.V(1).Info("built uwl_metrics_list.yaml", "content", userWorkloadMetricsContent)
 
 	existing := &corev1.ConfigMap{}
 	key := types.NamespacedName{Name: observabilityMetricsConfigMap, Namespace: observabilityNamespace}
@@ -48,7 +50,10 @@ func reconcileObservabilityMetrics(ctx context.Context, c client.Client, namespa
 					"app.kubernetes.io/managed-by": "telco-anomaly-detection",
 				},
 			},
-			Data: map[string]string{metricsListKey: metricsContent},
+			Data: map[string]string{
+				metricsListKey:             metricsContent,
+				userWorkloadMetricsListKey: userWorkloadMetricsContent,
+			},
 		}
 		logger.Info("creating observability-metrics-custom-allowlist ConfigMap")
 		if err := c.Create(ctx, cm); err != nil {
@@ -60,7 +65,11 @@ func reconcileObservabilityMetrics(ctx context.Context, c client.Client, namespa
 		return fmt.Errorf("getting %s ConfigMap: %w", observabilityMetricsConfigMap, err)
 	}
 
+	if existing.Data == nil {
+		existing.Data = make(map[string]string)
+	}
 	existing.Data[metricsListKey] = metricsContent
+	existing.Data[userWorkloadMetricsListKey] = userWorkloadMetricsContent
 	logger.Info("updating observability-metrics-custom-allowlist ConfigMap")
 	if err := c.Update(ctx, existing); err != nil {
 		return fmt.Errorf("updating %s ConfigMap: %w", observabilityMetricsConfigMap, err)
@@ -95,18 +104,26 @@ func cleanupObservabilityMetrics(ctx context.Context, c client.Client) error {
 	return nil
 }
 
-// buildMetricsListYAML produces the metrics_list.yaml content for the MCO custom allowlist.
-// Metric names are deduplicated across all provided alert configs.
-func buildMetricsListYAML(allAlerts []UserAlertConfig) string {
+// buildMetricsListYAML produces the metrics_list.yaml and uwl_metrics_list.yaml contents
+// for the MCO custom allowlist. Metric names are deduplicated independently in each list.
+func buildMetricsListYAML(allAlerts []UserAlertConfig) (string, string) {
+	var metrics, userWorkloadMetrics []string
+	for _, a := range allAlerts {
+		metrics = append(metrics, a.AlertMetrics...)
+		userWorkloadMetrics = append(userWorkloadMetrics, a.AlertUserWorkloadMetrics...)
+	}
+	return buildMetricNamesYAML(metrics), buildMetricNamesYAML(userWorkloadMetrics)
+}
+
+// buildMetricNamesYAML renders a deduplicated metric list in first-seen order.
+func buildMetricNamesYAML(metrics []string) string {
 	seen := make(map[string]bool)
 	var names []string
 
-	for _, a := range allAlerts {
-		for _, m := range a.AlertMetrics {
-			if !seen[m] {
-				seen[m] = true
-				names = append(names, m)
-			}
+	for _, m := range metrics {
+		if !seen[m] {
+			seen[m] = true
+			names = append(names, m)
 		}
 	}
 

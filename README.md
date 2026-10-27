@@ -116,6 +116,15 @@ controller restart during a delay may skip that interval's run on some spokes.
 
 With `alerts.userAlerts: true`, the controller also includes labeled user-defined alert ConfigMaps in its Thanos rules and MCO metrics allowlist. See [Adding a new alert](docs/adding-a-new-alert.md) for their format. Built-in alerts and the periodic checks are configured from embedded assets in `internal/controller/assets/`; the controller restores their ConfigMap contents on each reconcile. To change a built-in prompt, rule, skill, or MCP server, edit the corresponding asset and rebuild the controller image.
 
+Both system-managed and user-managed alert ConfigMaps can declare metrics to forward from spokes to the hub. Each field contains a JSON array of metric-name strings:
+
+| Alert ConfigMap field | Metric source | Key in `observability-metrics-custom-allowlist` |
+|---|---|---|
+| `alertMetrics` | Platform monitoring | `metrics_list.yaml` |
+| `alertUserWorkloadMetrics` (optional) | User-workload monitoring | `uwl_metrics_list.yaml` |
+
+For example, `alertUserWorkloadMetrics: '["application_requests_total"]'` adds that metric to the user-workload allowlist. Alert ownership and metric source are independent: either alert type can use either or both fields. The controller deduplicates each list separately and always writes both keys in `open-cluster-management-observability`, using `names: []` for an empty list. An omitted field, empty string, or `[]` requests no metrics. Invalid metric-field data causes the whole alert definition to be logged and skipped, including its Thanos rule. See [Adding a new alert](docs/adding-a-new-alert.md) for examples and validation details.
+
 ### Run records
 
 Each hub run has a namespaced `TelcoHealthCheckRun` (`thcr`) audit record on the hub in `telco-healthcheck-system`. Its status tracks the latest AgenticRun condition type and reason (`agenticRunStatus.type` and `.phase`), an AnalysisResult summary, and `agenticRunActionRequired`. The action-required field follows the latest referenced `AnalysisResult.status.actionRequired` while the type is `Analyzed`; any other non-empty type sets it to `"False"`. It is omitted when the type is empty, or while `Analyzed` has no analysis value. Returning to `Analyzed` restores the current AnalysisResult value.

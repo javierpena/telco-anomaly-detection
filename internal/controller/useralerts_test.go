@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"reflect"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
@@ -142,6 +143,71 @@ func TestListUserAlertConfigs_EmptyMetricsParsed(t *testing.T) {
 	}
 	if len(configs[0].AlertMetrics) != 0 {
 		t.Errorf("expected no metrics, got %v", configs[0].AlertMetrics)
+	}
+}
+
+func TestListUserAlertConfigs_UserWorkloadMetrics(t *testing.T) {
+	tests := []struct {
+		name            string
+		raw             string
+		platformMetrics string
+		want            []string
+		valid           bool
+	}{
+		{name: "omitted", valid: true},
+		{name: "empty string", raw: "", valid: true},
+		{name: "empty array", raw: "[]", valid: true},
+		{name: "whitespace", raw: " \n [ ] \t", valid: true},
+		{name: "workload only", raw: `["app_requests_total", "app_errors_total"]`, want: []string{"app_requests_total", "app_errors_total"}, valid: true},
+		{name: "both lists", raw: `["app_requests_total"]`, platformMetrics: `["platform_metric"]`, want: []string{"app_requests_total"}, valid: true},
+		{name: "malformed JSON", raw: "not-valid-json"},
+		{name: "object", raw: `{}`},
+		{name: "string", raw: `"app_requests_total"`},
+		{name: "number", raw: `42`},
+		{name: "boolean", raw: `true`},
+		{name: "non-string entry", raw: `["app_requests_total", 42]`},
+		{name: "null array", raw: `null`},
+		{name: "null entry", raw: `["app_requests_total", null]`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			data := map[string]string{
+				"alertName": "MyAlert",
+				"alertRule": "- alert: MyAlert\n  expr: up == 0",
+			}
+			if tt.name != "omitted" {
+				data["alertUserWorkloadMetrics"] = tt.raw
+			}
+			if tt.platformMetrics != "" {
+				data["alertMetrics"] = tt.platformMetrics
+			}
+			cm := makeUserAlertCM("my-alert", testNamespace, data)
+			c := fake.NewClientBuilder().WithScheme(newTestScheme(t)).WithObjects(cm).Build()
+
+			configs, err := listUserAlertConfigs(context.Background(), c, testNamespace)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if !tt.valid {
+				if len(configs) != 0 {
+					t.Fatalf("expected invalid alert to be skipped, got %d configs", len(configs))
+				}
+				return
+			}
+			if len(configs) != 1 {
+				t.Fatalf("expected 1 config, got %d", len(configs))
+			}
+			if got := configs[0].AlertUserWorkloadMetrics; !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("AlertUserWorkloadMetrics: got %v, want %v", got, tt.want)
+			}
+			var wantPlatform []string
+			if tt.platformMetrics != "" {
+				wantPlatform = []string{"platform_metric"}
+			}
+			if got := configs[0].AlertMetrics; !reflect.DeepEqual(got, wantPlatform) {
+				t.Errorf("AlertMetrics: got %v, want %v", got, wantPlatform)
+			}
+		})
 	}
 }
 

@@ -294,7 +294,7 @@ Triggered by changes to the singleton `TelcoHealthcheck` CR or `ManagedCluster` 
 5c. **Reconcile purge CronJob** — create/update `telco-healthcheck-purge` when `spec.purgeInterval` is set; remove it otherwise.
 7. **Reconcile Thanos alert rules** (`reconcileAlertRules`) — lists system-alert ConfigMaps (always) and user-alert ConfigMaps (when `userAlerts` is true) in the operator namespace, builds a unified Prometheus YAML from their `alertRule` fields, and creates or updates `thanos-ruler-custom-rules` in `open-cluster-management-observability`. Group names come from `alertGroupName` (system alerts) or default to `telco-user-<alertname-lowercased>` (user alerts). Non-fatal if this fails.
 8. **Reconcile AlertManager receiver** (`reconcileAlertManagerReceiver`) — read the `alertmanager-config` Secret in `open-cluster-management-observability`, upsert a webhook receiver entry pointing to the alert receiver service URL. Non-fatal if this fails.
-8a. **Reconcile MCO custom metrics allowlist** (`reconcileObservabilityMetrics`) — same listing pattern as step 7; deduplicates and writes all metric names from `alertMetrics` fields to `observability-metrics-custom-allowlist` in `open-cluster-management-observability`. Non-fatal if this fails.
+8a. **Reconcile MCO custom metrics allowlist** (`reconcileObservabilityMetrics`) — same listing pattern as step 7; independently deduplicates metric names from `alertMetrics` and `alertUserWorkloadMetrics`, writing them to `metrics_list.yaml` and `uwl_metrics_list.yaml` respectively in `observability-metrics-custom-allowlist` in `open-cluster-management-observability`. Both keys are always written, using `names: []` when empty. Non-fatal if this fails.
 9. **Periodic checks** (`runPeriodicChecks`) — `configuredPeriodicChecks` binds each check's name, enablement, period/jitter overrides, and own status timestamp into a descriptor. One loop handles all enabled checks in registration order: when due, validate its AgenticRun config and jitter window, then persist the due-time claim before scheduling distinct hub AgenticRuns targeting monitored spokes. Add future checks to the descriptor list instead of duplicating the scheduling block. The status update uses the API resource version as an optimistic lock: a queued reconcile holding stale status stops before scheduling another run. The earliest due check determines the next requeue; remaining status is persisted at the end of reconciliation. Each target receives an independently sampled, inclusive delay within its effective jitter window. Delayed tasks use the manager shutdown context so they stop on pod shutdown; `0s`/`0s` retains synchronous creation. A fixed positive window delays every cluster by that amount. The status timestamp records the scheduling decision, not the completion time. Delayed tasks exist only in memory: a shutdown before creation can skip that cluster for this interval, and a jitter window longer than the period can leave intervals overlapping.
 10. **Persist status** — write status changes not already included in the periodic schedule claim back to the API server.
 11. **Requeue** — return `ctrl.Result{RequeueAfter: <time-until-next-check>}`.
@@ -551,12 +551,15 @@ The `low-latency-check` ConfigMap configures the skill path `/skills/check-low-l
 | `alertName` | String | Used by `resolveAlertConfigMap` to match incoming alert names |
 | `alertGroupName` | String | Prometheus rule group name (system alerts only) |
 | `alertRule` | YAML block scalar | The `- alert: ...` rule body included in Thanos rule groups |
-| `alertMetrics` | JSON array string | Metric names added to the MCO allowlist |
+| `alertMetrics` | JSON array string | Platform metric names added to `metrics_list.yaml` in the MCO allowlist |
+| `alertUserWorkloadMetrics` | JSON array string (optional) | User-workload metric names added to `uwl_metrics_list.yaml` in the MCO allowlist |
 | `request` | Plain string | `spec.request` in the AgenticRun |
 | `skills` | JSON array of `{image, paths[]}` | `spec.tools.skills` |
 | `mcpServers` | JSON array of `{name, url, timeoutSeconds?}` | `spec.tools.mcpServers` |
 
-An absent key, empty string, or empty JSON array (`[]`) causes the corresponding field to be omitted from the AgenticRun spec. If `request` is empty the AgenticRun is skipped with an error log.
+For optional AgenticRun tool fields, an absent key, empty string, or empty JSON array (`[]`) causes the corresponding field to be omitted from the AgenticRun spec. If `request` is empty the AgenticRun is skipped with an error log.
+
+Both metric fields apply to system-managed and user-managed alerts. An omitted metric field, empty string, or `[]` contributes no metrics. `alertUserWorkloadMetrics` must otherwise be a JSON array of strings; JSON `null` and non-string entries are invalid. The shared parser (`parseAlertConfigMap`) rejects alert definitions with invalid metric-field data. Rule and allowlist listing log and skip these definitions, excluding both their Thanos rules and all their metrics.
 
 ### Variable expansion in ConfigMap values
 
@@ -597,7 +600,7 @@ The ConfigMap is created or updated on every reconcile. `reconcileAlertRules` li
 
 ### System-alert asset files
 
-The four system alerts are defined in YAML files under `internal/controller/assets/`, embedded in the controller binary via `//go:embed` in `internal/controller/systemalerts.go`. Each file is a complete ConfigMap definition (all seven data fields). The controller creates or updates the ConfigMap in the operator namespace on every reconcile when the spec boolean is enabled, and deletes it when disabled.
+The four system alerts are defined in YAML files under `internal/controller/assets/`, embedded in the controller binary via `//go:embed` in `internal/controller/systemalerts.go`. Each file is a complete ConfigMap definition and can include the optional `alertUserWorkloadMetrics` field. The controller creates or updates the ConfigMap in the operator namespace on every reconcile when the spec boolean is enabled, and deletes it when disabled.
 
 ### User-defined alert ConfigMaps
 
@@ -608,7 +611,7 @@ app.kubernetes.io/managed-by: telco-anomaly-detection
 ran.openshift.io/user-managed-alert: "true"
 ```
 
-All seven data fields apply (see ConfigMap data keys table above). `alertGroupName` defaults to `telco-user-<alertname-lowercased>` when absent.
+The same data fields apply, including optional `alertUserWorkloadMetrics` (see ConfigMap data keys table above). `alertGroupName` defaults to `telco-user-<alertname-lowercased>` when absent.
 
 **Controller watch:** the controller watches ConfigMaps with both required user-alert labels (cluster-wide). Any create, update, or delete of a matching ConfigMap immediately re-enqueues the singleton `TelcoHealthcheck` CR (`telco-healthcheck`).
 
@@ -629,14 +632,15 @@ data:
   alertName: MyCustomAlert
   alertRule: |
     - alert: MyCustomAlert
-      expr: my_custom_metric_total > 100
+      expr: my_custom_metric_total > 100 or my_application_metric_total > 100
       for: 5m
       labels:
         severity: warning
       annotations:
         cluster: '{{ $labels.cluster }}'
   alertMetrics: '["my_custom_metric_total"]'
-  request: "Investigate why my_custom_metric_total exceeded 100 on cluster ${CLUSTER_NAME}."
+  alertUserWorkloadMetrics: '["my_application_metric_total"]'
+  request: "Investigate MyCustomAlert on cluster ${CLUSTER_NAME}."
   skills: "[]"
   mcpServers: "[]"
 ```
@@ -673,14 +677,34 @@ route:
 Managed by `reconcileObservabilityMetrics` in `internal/controller/observabilitymetrics.go`.
 
 **Target:** ConfigMap `observability-metrics-custom-allowlist` in namespace `open-cluster-management-observability`  
-**Key:** `metrics_list.yaml`  
+**Keys:** `metrics_list.yaml`, `uwl_metrics_list.yaml`
+
 **Labels:** `app.kubernetes.io/managed-by: telco-anomaly-detection`
 
 Applied on the hub cluster, this ConfigMap is picked up by MCO and propagated to the `metrics-collector` on every managed cluster, extending the set of metrics forwarded to the hub's Thanos Receive.
 
-The ConfigMap content is computed by `buildMetricsListYAML` from the unified list of system-alert and user-alert ConfigMaps (same listing pattern as `reconcileAlertRules`). Metric names are deduplicated across all alert configs. When no alerts provide metrics, the key is written with `names: []` (inert but present). On CR deletion the ConfigMap is removed.
+The ConfigMap content is computed by `buildMetricsListYAML` from the unified list of system-alert and user-alert ConfigMaps (same listing pattern as `reconcileAlertRules`). User-alert ConfigMaps contribute only when `spec.alerts.userAlerts` is true. Alert ownership is independent of metric source: either alert type can declare platform metrics, user-workload metrics, or both.
 
-### Current metric groups
+| Alert-definition field | Metric source | Destination key |
+|---|---|---|
+| `alertMetrics` | Platform monitoring | `metrics_list.yaml` |
+| `alertUserWorkloadMetrics` (optional) | User-workload monitoring | `uwl_metrics_list.yaml` |
+
+Metric names are deduplicated independently within each list across all alert configs, preserving first-seen order. A metric explicitly declared in both fields appears in both lists. Both keys are always managed, each written with `names: []` when no alerts provide metrics for that source. Reconciliation replaces both lists, clearing stale entries when metrics or alerts are removed or user alerts are disabled; unrelated ConfigMap data keys are preserved. On CR deletion the ConfigMap is removed.
+
+For example, the alert definition above produces:
+
+```yaml
+data:
+  metrics_list.yaml: |
+    names:
+      - my_custom_metric_total
+  uwl_metrics_list.yaml: |
+    names:
+      - my_application_metric_total
+```
+
+### Current platform metric groups
 
 | Metric | Comes from |
 |---|---|

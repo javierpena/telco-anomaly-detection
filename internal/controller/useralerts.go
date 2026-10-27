@@ -22,15 +22,16 @@ const (
 
 // UserAlertConfig holds the parsed contents of an alert ConfigMap (system or user-defined).
 type UserAlertConfig struct {
-	AlertName     string
-	GroupName     string // from alertGroupName data key; empty for user alerts (builder defaults to telco-user-<alertname>)
-	AlertRule     string
-	AlertMetrics  []string
-	ConfigMapName string
+	AlertName                string
+	GroupName                string // from alertGroupName data key; empty for user alerts (builder defaults to telco-user-<alertname>)
+	AlertRule                string
+	AlertMetrics             []string
+	AlertUserWorkloadMetrics []string
+	ConfigMapName            string
 }
 
-// parseAlertConfigMap extracts an UserAlertConfig from a ConfigMap's data fields.
-// Returns false when alertName or alertRule are absent, or alertMetrics JSON is malformed.
+// parseAlertConfigMap extracts a UserAlertConfig from a ConfigMap's data fields.
+// Returns false when alertName or alertRule are absent, or either metric field is invalid.
 func parseAlertConfigMap(cm corev1.ConfigMap) (UserAlertConfig, bool) {
 	name := cm.Data["alertName"]
 	rule := cm.Data["alertRule"]
@@ -45,18 +46,34 @@ func parseAlertConfigMap(cm corev1.ConfigMap) (UserAlertConfig, bool) {
 		}
 	}
 
+	var userWorkloadMetrics []string
+	if raw := cm.Data["alertUserWorkloadMetrics"]; raw != "" {
+		// Pointers distinguish JSON null entries from valid metric-name strings.
+		var names []*string
+		if err := json.Unmarshal([]byte(raw), &names); err != nil || names == nil {
+			return UserAlertConfig{}, false
+		}
+		for _, name := range names {
+			if name == nil {
+				return UserAlertConfig{}, false
+			}
+			userWorkloadMetrics = append(userWorkloadMetrics, *name)
+		}
+	}
+
 	return UserAlertConfig{
-		AlertName:     name,
-		GroupName:     cm.Data["alertGroupName"],
-		AlertRule:     rule,
-		AlertMetrics:  metrics,
-		ConfigMapName: cm.Name,
+		AlertName:                name,
+		GroupName:                cm.Data["alertGroupName"],
+		AlertRule:                rule,
+		AlertMetrics:             metrics,
+		AlertUserWorkloadMetrics: userWorkloadMetrics,
+		ConfigMapName:            cm.Name,
 	}, true
 }
 
 // listUserAlertConfigs returns the parsed contents of all user-alert ConfigMaps in namespace.
 // ConfigMaps must carry both userAlertManagedByLabel and userAlertLabel labels.
-// Entries missing alertName or alertRule are logged and skipped.
+// Entries missing alertName or alertRule, or with invalid metric fields, are logged and skipped.
 func listUserAlertConfigs(ctx context.Context, c client.Client, namespace string) ([]UserAlertConfig, error) {
 	logger := log.FromContext(ctx)
 
@@ -75,7 +92,7 @@ func listUserAlertConfigs(ctx context.Context, c client.Client, namespace string
 	for _, cm := range cmList.Items {
 		cfg, ok := parseAlertConfigMap(cm)
 		if !ok {
-			logger.Info("user-alert ConfigMap missing alertName, alertRule, or has invalid alertMetrics, skipping",
+			logger.Info("user-alert ConfigMap missing alertName or alertRule, or has invalid alertMetrics or alertUserWorkloadMetrics, skipping",
 				"configmap", cm.Name)
 			continue
 		}
