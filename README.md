@@ -94,9 +94,6 @@ creates a hub `AgenticRun` targeting every monitored spoke when due. `rdsComplia
 and `lowLatencyCheck.period` independently override the default interval. Enabling
 RDS compliance also deploys `kube-compare-mcp` in the operator namespace.
 
-The `low-latency-check` uses `/skills/check-low-latency-configuration` from the
-skills image and requires no MCP servers.
-
 `${CLUSTER_NAME}` is expanded for each spoke. Periodic AgenticRun creation is
 spread across an independent 30s–5m window per cluster by default. Each check
 can override each global jitter bound independently; bounds must be non-negative
@@ -177,8 +174,6 @@ make deploy
 ```
 
 This applies the CRDs, RBAC, validating webhook, Services, and Deployments. The operator runs in `telco-healthcheck-system`; `openshift-lightspeed` and `open-cluster-management-observability` must exist before applying the namespaced RBAC. The webhook uses an OpenShift service-CA serving certificate; wait for the controller Deployment to become Ready before creating the singleton CR, because admission fails until the webhook CA bundle is available.
-
-**Upgrading from spoke-created runs:** save the current schedule settings, scale the old alert receiver to zero, and set `periodicHealthChecks.period` to `0s` to pause new creation. Allow any in-flight creates to finish. Leave the old controller running until no `TelcoHealthCheckRun` is annotated `ran.openshift.io/spoke-creation-pending: "true"`; investigate any record that does not resolve before proceeding. Deploy both new images, restore the schedule, and scale the receiver back up. Completed old records remain historical snapshots; new records carry `ran.openshift.io/hub-agentic-run: "true"` and are the only records recovered or synchronized from hub runs. A `Created` record only means the hub API accepted the AgenticRun; use its subsequent status for the investigation outcome.
 
 ### 5. Create a TelcoHealthcheck CR
 

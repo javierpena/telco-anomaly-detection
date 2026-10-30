@@ -101,4 +101,3 @@ Substitute the real model name/ID (and its contact) whenever a different model i
 
 See `steps.md` for the phase tracker. Phases 1–8 are complete. Deferred work:
 - **Phase 9:** Real `AgenticRun` prompts for `podNetwork` (others done); skill paths once OCI image is finalized.
-- **Phase 10:** RDS compliance check implementation.

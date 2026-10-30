@@ -128,7 +128,7 @@
 - [x] Replace per-spoke watches with hub-local AgenticRun/AnalysisResult status reconciliation on the existing run-record controller.
 - [x] Scope run/result and Secret access to named namespaces; remove the operator's spoke credential access.
 - [x] Build the AgenticRun link from the hub console Route (omit it when unavailable), and update architecture/README/cutover instructions.
-- [ ] Complete the production cutover (drain pending spoke records) and live two-spoke/version/Secret-behavior verification against installed Lightspeed components.
+- [x] Complete the production cutover (drain pending spoke records) and live two-spoke/version/Secret-behavior verification against installed Lightspeed components.
 
 ## Verification Commands
 

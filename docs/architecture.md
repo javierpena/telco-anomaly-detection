@@ -1,6 +1,6 @@
 # Telco Anomaly Detection Operator — Architecture
 
-> **Maintenance note:** Keep this document in sync with code changes. See `CLAUDE.md` for the reminder.
+> **Maintenance note:** Keep this document in sync with code changes. See `AGENTS.md` for the reminder.
 
 ## Overview
 
@@ -849,12 +849,6 @@ Example `TelcoHealthcheck` CR for reference.
 **Image:** `quay.io/javierpena/telco-anomaly-skills:latest`
 
 Contains skill definition files under `skills/`. Each subdirectory is one skill. The image path(s) to load for each check type are configured in the corresponding AgenticRun config ConfigMap (`skills` key).
-
-### Current skills
-
-| Skill | Directory | Description |
-|---|---|---|
-| SR-IOV pod network health | `skills/check-sriov-pod-network-health/` | Diagnoses SR-IOV network issues on telco pods |
 
 ---
 
